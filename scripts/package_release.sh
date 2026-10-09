@@ -60,6 +60,7 @@ ROM_CRC32="$(python3 "$IDENTITY_TOOL" rom_identity.txt --get expected_crc32)"
 # directory the game loads exe-relative (translations, ...).
 exec bash "$IMPL" \
   --runtime-dir mods \
+  --runtime-dir assets \
   --build-dir "$BUILD_DIR" \
   --artifact "$PLATFORM" \
   --exe-name SuperCastlevaniaIvSNESRecomp \

@@ -1,0 +1,16 @@
+Achievement metadata and numbered PNG badges originate from:
+https://retroachievements.org/game/562
+Retrieved October 7, 2026. Base set: 36 achievements, 568 points.
+Set authors listed on that page: Pointless, DarkFPC, cirellio.
+Badge source: https://media.retroachievements.org/Badge/<badge>.png
+
+card.png is the achievement-card artwork supplied by the user.
+The additional Boss Rush achievement uses its trophy illustration.
+
+catalog.json is the offline metadata source. To regenerate the C table:
+python tools/make-achievement-catalog.py
+
+Runtime progress is separate from these assets and from game save states.
+This local adaptation does not authenticate with or submit unlocks to RetroAchievements.
+
+unlock.wav is the sound effect supplied by the user as 05.wav.

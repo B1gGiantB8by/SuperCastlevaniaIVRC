@@ -1,5 +1,6 @@
 # Generated recompiler output — derived from a copyrighted ROM. Never commit.
 /src/gen/
+/other-castle-roms.cfg
 /recomp/funcs.h
 
 # The ROM itself, in every form. Players supply their own.
@@ -22,6 +23,22 @@
 /rom.cfg
 /keybinds.ini
 /config.ini
+/game-timing.cfg
+/bezel.cfg
+/widescreen.cfg
 /input.ini
 
 .DS_Store
+
+# Machine-local captures, reports, and mod selection
+/*.apu.tsv
+/*.dma.tsv
+/*.ppuw.tsv
+/*.bin
+/*.fb.bgrx
+/*.fb.bmp
+/*.info.json
+/*.regs.json
+/last_run_report.json
+/screenshots/
+/mods/preloaded/state.toml

@@ -1,0 +1,21 @@
+wait 1800
+press start 2
+wait 180
+press start 2
+wait 180
+press down 1
+press down 1
+press down 1
+press right 1
+press right 1
+press right 1
+press right 1
+press right 1
+press right 1
+press b 1
+press a 1
+press y 1
+wait 300
+press right 120
+press y 10
+wait 60

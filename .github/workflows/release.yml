@@ -88,6 +88,9 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      - name: Apply project dependency patches
+        run: bash tools/apply-project-patches.sh
+
       - name: Record framework pins
         run: |
           set -euo pipefail
@@ -188,6 +191,9 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 1
+
+      - name: Apply project dependency patches
+        run: bash tools/apply-project-patches.sh
 
       - name: Record framework pins
         run: bash snesrecomp/tools/ci/record_pins.sh

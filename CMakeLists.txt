@@ -39,8 +39,18 @@ include(${SNESRECOMP_ROOT}/runner/runner.cmake)
 add_executable(SuperCastlevaniaIvSNESRecomp
     ${SNESRECOMP_RUNNER_SOURCES}
     src/main.c
+    src/title_menu.c
+    src/other_castle.c
     src/host_contract.c
     src/game_rtl.c
+    src/game_timing.c
+    src/bezel.c
+    src/sciv_widescreen.c
+    src/sciv_widescreen_tiles.c
+    src/boss_rush.c
+    src/achievements.c
+    src/achievement_overlay.c
+    src/achievement_sound.c
     src/gen_stubs.c
 )
 
@@ -87,6 +97,7 @@ target_include_directories(SuperCastlevaniaIvSNESRecomp PRIVATE
 )
 target_link_libraries(SuperCastlevaniaIvSNESRecomp PRIVATE ${SNESRECOMP_RUNNER_LIBRARIES})
 target_compile_definitions(SuperCastlevaniaIvSNESRecomp PRIVATE
+    SNESRECOMP_CMAKE_TARGET_NAME="SuperCastlevaniaIvSNESRecomp"
     SNES_GAME_VERSION="${SNESRECOMP_BUILD_VERSION}"
     SNES_GAME_TITLE="Super Castlevania IV"
 )
@@ -99,6 +110,9 @@ snesrecomp_target_sdl(SuperCastlevaniaIvSNESRecomp)
 # hooks; the host is the framework's and improves on a submodule pull.
 # Add TIER2 once this port reads the interpreter-gap manifest after each run.
 snesrecomp_target_desktop_host(SuperCastlevaniaIvSNESRecomp)
+# Shared CRT Soft, LCD Grid, Sharp and Warm Composite catalog, also used by
+# Super Mario World Recomp. Stage the presets and their referenced GLSL passes.
+snesrecomp_target_shader_presets(SuperCastlevaniaIvSNESRecomp)
 # rom.cfg (the ROM the wizard set this project up from; git-ignored) is
 # staged beside the executable when none is there yet, so the first launch
 # opens on that dump rather than asking for one.
@@ -134,3 +148,7 @@ target_include_directories(SuperCastlevaniaIvSNESRecomp PRIVATE
 
 # Netplay is not built into this target.
 # No multitap: two seats, one controller per port.
+
+# Title-specific Kickle-style frontend and runtime menu shortcuts.
+target_compile_definitions(SuperCastlevaniaIvSNESRecomp PRIVATE SCIV_FRONTEND=1)
+snesrecomp_target_stage_dir(SuperCastlevaniaIvSNESRecomp ${CMAKE_SOURCE_DIR}/assets/castlevania assets/castlevania)

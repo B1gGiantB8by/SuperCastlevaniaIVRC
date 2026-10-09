@@ -1,0 +1,588 @@
+diff --git a/src/common/backends/imgui/sciv_frontend.inc b/src/common/backends/imgui/sciv_frontend.inc
+new file mode 100644
+index 0000000..8bed04a
+--- /dev/null
++++ b/src/common/backends/imgui/sciv_frontend.inc
+@@ -0,0 +1,582 @@
++#include "snes_savestate_menu.h"
++#include "boss_rush.h"
++#include "game_timing.h"
++#include "bezel.h"
++#include "level_select.h"
++#include "achievements.h"
++#include "other_castle.h"
++static LauncherTexture s_sciv_badges[SCIV_ACHIEVEMENT_COUNT], s_sciv_achievement_card;
++static int s_sciv_page = 0;
++static bool s_sciv_rewind_pad_capture=false;
++static bool s_sciv_focus_slots = false;
++static int s_sciv_slot = 0;
++static char s_sciv_save_status[80] = {0};
++static bool s_sciv_slots_active = false;
++static bool s_sciv_focus_nav = false;
++static bool s_sciv_prompt = false;
++static bool s_sciv_open_prompt = false;
++static bool s_sciv_close_prompt = false;
++static int s_sciv_prompt_slot = 0;
++static int s_sciv_prompt_choice = 0;
++static int s_sciv_prompt_action = -1;
++static bool s_sciv_focus_prompt = false;
++static int s_sciv_nav_item = 5;
++static bool s_sciv_focus_options = false;
++static void sciv_choose_slot(int slot) {
++    if(sciv_one_life_active()) return;
++    s_sciv_slot = slot;
++    s_sciv_prompt_slot = slot;
++    s_sciv_save_status[0] = 0;
++    char info[96];
++    s_sciv_prompt_choice = snes_savestate_menu_slot_info(slot,info,sizeof(info)) ? 0 : 1;
++    s_sciv_prompt_action = -1;
++    s_sciv_focus_prompt = true;
++    s_sciv_open_prompt = true;
++    s_sciv_prompt = true;
++}
++// Only the slot list owns slot controls. The left menu and dialog use ImGui nav.
++static bool sciv_save_controller(LauncherModel *m, const SDL_Event &ev) {
++    const bool escape = ev.type == SDL_EVENT_KEY_DOWN && ev.key.key == SDLK_ESCAPE;
++    bool pad = ev.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
++    int b = pad ? ev.gbutton.button : -1;
++    if(ev.type==SDL_EVENT_KEY_DOWN && !ev.key.repeat) {
++        switch(ev.key.key) {
++        case SDLK_LEFT: b=SDL_GAMEPAD_BUTTON_DPAD_LEFT; break;
++        case SDLK_RIGHT: b=SDL_GAMEPAD_BUTTON_DPAD_RIGHT; break;
++        case SDLK_UP: b=SDL_GAMEPAD_BUTTON_DPAD_UP; break;
++        case SDLK_DOWN: b=SDL_GAMEPAD_BUTTON_DPAD_DOWN; break;
++        case SDLK_RETURN: b=SDL_GAMEPAD_BUTTON_SOUTH; break;
++        default: break;
++        }
++        pad=b>=0;
++    }
++    if(ev.type==SDL_EVENT_GAMEPAD_AXIS_MOTION && ev.gaxis.axis<=SDL_GAMEPAD_AXIS_LEFTY) {
++        static int direction[2]={0,0};
++        const int axis=ev.gaxis.axis;
++        const int next=ev.gaxis.value>16000 ? 1 : ev.gaxis.value < -16000 ? -1 : 0;
++        const bool edge=next && next!=direction[axis];
++        direction[axis]=next;
++        if(edge) {
++            b=axis==SDL_GAMEPAD_AXIS_LEFTX ? (next>0 ? SDL_GAMEPAD_BUTTON_DPAD_RIGHT : SDL_GAMEPAD_BUTTON_DPAD_LEFT)
++                                              : (next>0 ? SDL_GAMEPAD_BUTTON_DPAD_DOWN : SDL_GAMEPAD_BUTTON_DPAD_UP);
++            pad=true;
++        }
++    }
++    if (s_sciv_prompt) {
++        if (escape || b == SDL_GAMEPAD_BUTTON_EAST) {
++            s_sciv_close_prompt = true;
++            return true;
++        }
++        const bool up = b==SDL_GAMEPAD_BUTTON_DPAD_UP || (ev.type==SDL_EVENT_KEY_DOWN && ev.key.key==SDLK_UP);
++        const bool down = b==SDL_GAMEPAD_BUTTON_DPAD_DOWN || (ev.type==SDL_EVENT_KEY_DOWN && ev.key.key==SDLK_DOWN);
++        if(up || down) {
++            char info[96];
++            const bool occupied=snes_savestate_menu_slot_info(s_sciv_prompt_slot,info,sizeof(info))!=0;
++            do { s_sciv_prompt_choice=(s_sciv_prompt_choice+(down ? 1 : 2))%3; }
++            while(!occupied && s_sciv_prompt_choice==0);
++            s_sciv_focus_prompt=true;
++            return true;
++        }
++        if(b==SDL_GAMEPAD_BUTTON_SOUTH || (ev.type==SDL_EVENT_KEY_DOWN && (ev.key.key==SDLK_RETURN || ev.key.key==SDLK_SPACE))) {
++            s_sciv_prompt_action=s_sciv_prompt_choice;
++            return true;
++        }
++        return false;
++    }
++    if (!m->in_session || s_sciv_page != 5 || !pad) return false;
++    if (s_sciv_slots_active && (b == SDL_GAMEPAD_BUTTON_DPAD_LEFT || b == SDL_GAMEPAD_BUTTON_EAST)) {
++        s_sciv_slots_active = false;
++        s_sciv_focus_slots = false;
++        s_sciv_nav_item = s_sciv_page;
++        s_sciv_focus_nav = true;
++        return true;
++    }
++    if (!s_sciv_slots_active && b == SDL_GAMEPAD_BUTTON_DPAD_RIGHT) {
++        if (s_sciv_nav_item == 8) return true;
++        s_sciv_slots_active = true;
++        s_sciv_focus_slots = true;
++        return true;
++    }
++    if (!s_sciv_slots_active) {
++        if(b==SDL_GAMEPAD_BUTTON_DPAD_UP || b==SDL_GAMEPAD_BUTTON_DPAD_DOWN) {
++            s_sciv_nav_item=(s_sciv_nav_item+(b==SDL_GAMEPAD_BUTTON_DPAD_DOWN ? 1 : 8))%9;
++            s_sciv_focus_nav=true;
++            return true;
++        }
++        if(b==SDL_GAMEPAD_BUTTON_SOUTH) {
++            if(s_sciv_nav_item==8) { m->action=LNG_ACTION_QUIT; return true; }
++            s_sciv_page=s_sciv_nav_item;
++            s_sciv_focus_options=true;
++            if(s_sciv_page==5) { s_sciv_slots_active=true; s_sciv_focus_slots=true; }
++            return true;
++        }
++        return false;
++    }
++    if (b == SDL_GAMEPAD_BUTTON_DPAD_DOWN || b == SDL_GAMEPAD_BUTTON_DPAD_UP) {
++        s_sciv_slot = (s_sciv_slot + (b == SDL_GAMEPAD_BUTTON_DPAD_DOWN ? 1 : SNES_SAVESTATE_SLOTS-1)) % SNES_SAVESTATE_SLOTS;
++        s_sciv_save_status[0] = 0;
++        s_sciv_focus_slots = true;
++        return true;
++    }
++    if (b == SDL_GAMEPAD_BUTTON_SOUTH) {
++        sciv_choose_slot(s_sciv_slot);
++        return true;
++    }
++    return false;
++}
++extern "C" void sciv_open_save_states(void) {
++    s_sciv_page = 5;
++    s_sciv_slots_active = true;
++    s_sciv_focus_slots = true;
++    s_sciv_save_status[0] = 0;
++}
++static void sciv_begin_frontend(void) {
++    sciv_achievements_menu_opened();
++    s_sciv_rewind_pad_capture=false;
++    // A window close can bypass the dialog's Back button.
++    s_sciv_prompt=false;
++    s_sciv_open_prompt=false;
++    s_sciv_close_prompt=false;
++    s_sciv_prompt_action=-1;
++    s_sciv_focus_nav=false;
++    s_sciv_focus_options=false;
++    s_sciv_slots_active=s_sciv_page==5;
++    s_sciv_focus_slots=s_sciv_slots_active;
++}
++// Title-owned layout; shared panels retain verification and settings behavior.
++static void draw_sciv_frontend(LauncherModel *m, const LauncherTheme &th) {
++    int &page = s_sciv_page;
++    const ImVec2 size = ImGui::GetIO().DisplaySize;
++    auto *bg = ImGui::GetBackgroundDrawList();
++    if (g_sciv_background.id) {
++        const float scale = std::max(size.x / 2048.f, size.y / 1470.f);
++        const ImVec2 extent(2048.f * scale, 1470.f * scale);
++        const ImVec2 origin((size.x - extent.x) * .5f, (size.y - extent.y) * .5f);
++        bg->AddImage(tid(g_sciv_background), origin, ImVec2(origin.x + extent.x, origin.y + extent.y));
++    }
++    bg->AddRectFilled(ImVec2(0,0),size,IM_COL32(7,5,18,65));
++    if (m->in_session && !s_sciv_prompt && ImGui::IsKeyPressed(ImGuiKey_Escape)) m->action = LNG_ACTION_LAUNCH;
++    const float left = size.x >= 1000 ? size.x * .44f : size.x * .04f;
++    const float width = size.x - left - size.x * .04f;
++    ImGui::SetNextWindowPos(ImVec2(left,size.y*.04f),ImGuiCond_Always);
++    ImGui::SetNextWindowSize(ImVec2(width,size.y*.92f),ImGuiCond_Always);
++    ImGui::PushStyleColor(ImGuiCol_WindowBg,ImVec4(.035f,.025f,.075f,.94f));
++    ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(.34f,.035f,.055f,1));
++    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,ImVec4(.55f,.07f,.09f,1));
++    ImGui::PushStyleColor(ImGuiCol_ButtonActive,ImVec4(.7f,.1f,.12f,1));
++    ImGui::PushStyleColor(ImGuiCol_Header,ImVec4(.4f,.07f,.1f,1));
++    ImGui::PushStyleColor(ImGuiCol_NavCursor,ImVec4(1,.78f,.12f,1));
++    ImGui::PushStyleColor(ImGuiCol_TitleBgActive,ImVec4(.34f,.035f,.055f,1));
++    ImGui::PushStyleColor(ImGuiCol_ModalWindowDimBg,ImVec4(0,0,0,.65f));
++    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,16);
++    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,7);
++    ImGui::Begin("##sciv-home",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings);
++    const float logo_w = std::min(width-40.f,440.f);
++    if (g_sciv_logo.id) {
++        ImGui::SetCursorPosX((width-logo_w)*.5f);
++        ImGui::Image(tid(g_sciv_logo),ImVec2(logo_w,logo_w*571.f/1468.f));
++    } else ImGui::TextUnformatted("SUPER CASTLEVANIA IV");
++    ImGui::TextColored(ImVec4(1,.78f,.3f,1),"%s",m->in_session ? "GAME PAUSED" : "SUPER NINTENDO RECOMPILATION");
++    const char *pages[] = {m->in_session ? "Resume Game" : "Start Game","Display Options","Audio Options","Controls","Mods","Save States","Other Modes","Achievements"};
++    const float nav_w=std::min(175.f,width*.32f);
++    const float footer_h=ImGui::GetFrameHeightWithSpacing()+ImGui::GetTextLineHeightWithSpacing()+8.f;
++    ImGui::BeginChild("##sciv-nav",ImVec2(nav_w,-footer_h),ImGuiChildFlags_Borders|ImGuiChildFlags_NavFlattened);
++    bool focus=s_sciv_focus_options;
++    s_sciv_focus_options=false;
++    if(s_sciv_focus_nav) ImGui::SetWindowFocus();
++    for(int i=0;i<8;++i) {
++        if(s_sciv_focus_nav && i==s_sciv_nav_item) ImGui::SetKeyboardFocusHere();
++        if(ImGui::Selectable(pages[i],page==i,0,ImVec2(0,34))) {
++            page=i; s_sciv_nav_item=i; focus=true;
++            s_sciv_slots_active = i==5;
++        }
++        if(page==5 && !s_sciv_slots_active && i==s_sciv_nav_item)
++            ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(),ImGui::GetItemRectMax(),IM_COL32(255,199,50,255),4,0,2);
++    }
++    ImGui::Spacing();
++    if(s_sciv_focus_nav && s_sciv_nav_item==8) ImGui::SetKeyboardFocusHere();
++    if(ImGui::Button("Quit Game",ImVec2(-1,36))) m->action=LNG_ACTION_QUIT;
++    if(page==5 && !s_sciv_slots_active && s_sciv_nav_item==8)
++        ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(),ImGui::GetItemRectMax(),IM_COL32(255,199,50,255),4,0,2);
++    s_sciv_focus_nav = false;
++    ImGui::EndChild(); ImGui::SameLine();
++    ImGui::BeginChild("##sciv-options",ImVec2(0,-footer_h),ImGuiChildFlags_Borders|ImGuiChildFlags_NavFlattened);
++    ImGui::TextUnformatted(pages[page]); ImGui::Separator(); ImGui::Spacing();
++    if(focus) { ImGui::SetScrollY(0); ImGui::SetKeyboardFocusHere(); }
++    if(page==0) {
++        if(!m->in_session) {
++            ImGui::TextWrapped("%s",m->rom_present ? m->rom_file : "Select your Super Castlevania IV (USA) ROM.");
++            if(ImGui::Button("Load ROM",ImVec2(-1,44))) {
++                const char *patterns[]={"*.sfc","*.smc"};
++                request_rom_picker(m,"Load Super Castlevania IV ROM",patterns,2,"SNES ROM",true);
++            }
++        }
++        bool ready=m->in_session || launcher_model_can_launch(m);
++        if(!ready) ImGui::BeginDisabled();
++        if(ImGui::Button(m->in_session ? "Resume Game" : "Start Game",ImVec2(-1,52))) m->action=LNG_ACTION_LAUNCH;
++        if(!ready) { ImGui::EndDisabled(); ImGui::TextWrapped("Load a matching original ROM to start."); }
++        ImGui::Spacing();
++        ImGui::TextWrapped("Escape or L3 + R3 opens this menu during gameplay. Display, audio and control settings are available here.");
++    } else if(page==1) {
++        bool bezel = sciv_bezel_enabled() != 0;
++        if (ImGui::Checkbox("Bezel Mode", &bezel)) sciv_bezel_set(bezel);
++        ImGui::TextWrapped("Maximum-size 4:3 game picture with Castlevania artwork fitted to the sides. Overrides display aspect and stretch while enabled.");
++        ImGui::Spacing(); ImGui::Separator();
++        int timing=sciv_timing_enhanced();
++        if(ImGui::Combo("Game Speed / Timing", &timing, "Original\0Enhanced\0")) sciv_timing_set(timing);
++        ImGui::TextWrapped("Original preserves SNES slowdown. Enhanced gives the CPU twice the processing budget to reduce slowdown throughout the game, while keeping video and music at their normal rate.");
++        ImGui::Spacing(); ImGui::Separator();
++        draw_display_controls(m,th);
++    }
++    else if(page==2) draw_audio_controls(m,th);
++    else if(page==3) draw_player_panel(m,th,0,ImGui::GetContentRegionAvail().x);
++    else if(page==4) {
++        draw_mods(m,th);
++        ImGui::Spacing(); ImGui::Separator();
++        ImGui::BeginDisabled(sciv_other_castle_active());
++        ImGui::TextUnformatted("Level Select");
++        ImGui::TextWrapped("Choose any substage, including Dracula's Castle. Map transitions start before the first substage of stages 2-B.");
++        static int selected_level=0;
++        if(ImGui::BeginCombo("Stage",sciv_level_select_name(selected_level))) {
++            for(int i=0;i<sciv_level_select_count();++i) {
++                if(ImGui::Selectable(sciv_level_select_name(i),selected_level==i)) selected_level=i;
++                if(selected_level==i) ImGui::SetItemDefaultFocus();
++            }
++            ImGui::EndCombo();
++        }
++        ImGui::BeginDisabled(!(m->in_session || launcher_model_can_launch(m)));
++        if(ImGui::Button("Start Selected Stage",ImVec2(-1,40))) {
++            sciv_level_select_start(selected_level,0); m->action=LNG_ACTION_LAUNCH;
++        }
++        ImGui::BeginDisabled(!sciv_level_select_has_transition(selected_level));
++        if(ImGui::Button("Start Map Transition",ImVec2(-1,40))) {
++            sciv_level_select_start(selected_level,1); m->action=LNG_ACTION_LAUNCH;
++        }
++        ImGui::EndDisabled(); ImGui::EndDisabled();
++        ImGui::TextWrapped("Starting a stage replaces the current session. Save your campaign first to return to it later.");
++        ImGui::Spacing(); ImGui::Separator();
++        ImGui::EndDisabled();
++    }
++    else if(page==5) {
++        int &slot=s_sciv_slot;
++        auto &status=s_sciv_save_status;
++        if(sciv_one_life_active()) {
++            ImGui::TextWrapped("Save states and loading are disabled in One Life Mode (Experimental).");
++        } else if(!m->in_session) {
++            ImGui::TextWrapped("Start the game to save or load a state. During gameplay, open this page with Back + RB or F11.");
++        } else {
++            ImGui::TextWrapped("Select a slot to choose Load, Save / Overwrite Save, or Back.");
++            ImGui::BeginChild("##sciv-slots",ImVec2(0,std::max(100.f,ImGui::GetContentRegionAvail().y-125.f)),ImGuiChildFlags_Borders|ImGuiChildFlags_NavFlattened);
++            if(s_sciv_focus_slots || focus) { ImGui::SetWindowFocus(); s_sciv_focus_slots = true; }
++            for(int i=0;i<SNES_SAVESTATE_SLOTS;++i) {
++                char info[96],label[140];
++                snes_savestate_menu_slot_info(i,info,sizeof(info));
++                snprintf(label,sizeof(label),"Slot %02d   %s",i+1,info);
++                if(s_sciv_focus_slots && i==slot) { ImGui::SetKeyboardFocusHere(); }
++                if(ImGui::Selectable(label,slot==i,0,ImVec2(0,32))) {
++                    s_sciv_slots_active = true;
++                    sciv_choose_slot(i);
++                }
++                if(s_sciv_slots_active && i==slot)
++                    ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(),ImGui::GetItemRectMax(),IM_COL32(255,199,50,255),4,0,2);
++                if(s_sciv_focus_slots && i==slot) ImGui::SetScrollHereY(.5f);
++            }
++            s_sciv_focus_slots = false;
++            ImGui::EndChild();
++            ImGui::Text("Selected: Slot %02d",slot+1);
++            if(ImGui::Button("Choose Slot",ImVec2(160,38))) sciv_choose_slot(slot);
++            if(status[0]) ImGui::TextWrapped("%s",status);
++        }
++    }
++    else if(page==6) {
++        ImGui::BeginDisabled(sciv_other_castle_active());
++        ImGui::TextUnformatted("Boss Rush");
++        const int status=sciv_boss_rush_status();
++        ImGui::TextWrapped("Fight all 14 bosses in order. Each arena starts with full health, 40 hearts, the upgraded whip and a triple cross. One life: death ends the run.");
++        if(status) {
++            unsigned frames=sciv_boss_rush_frames();
++            ImGui::Spacing();
++            ImGui::Text("%s",status==2 ? "BOSS RUSH COMPLETE!" : status==3 ? "RUN ENDED" : "BOSS RUSH IN PROGRESS");
++            ImGui::Text("Boss %d / 14: %s",sciv_boss_rush_index()+1,sciv_boss_rush_name(sciv_boss_rush_index()));
++            ImGui::Text("Time: %u:%02u.%02u",frames/3600,(frames/60)%60,(frames%60)*100/60);
++        }
++        bool ready=m->in_session || launcher_model_can_launch(m);
++        if(!ready) ImGui::BeginDisabled();
++        if(ImGui::Button(status ? "Restart Boss Rush" : "Start Boss Rush",ImVec2(-1,48))) {
++            sciv_boss_rush_start(); m->action=LNG_ACTION_LAUNCH;
++        }
++        if(!ready) { ImGui::EndDisabled(); ImGui::TextWrapped("Load your matching USA ROM on Start Game first."); }
++        if(status && m->in_session && ImGui::Button("Return to Title",ImVec2(-1,40))) {
++            sciv_boss_rush_stop(); m->action=LNG_ACTION_LAUNCH;
++        }
++        ImGui::Spacing();
++        ImGui::TextWrapped("Starting or restarting replaces the current gameplay session. Save your campaign first if you want to return to it. Save states and rewind preserve Boss Rush progress.");
++        ImGui::Spacing(); ImGui::Separator();
++        ImGui::TextUnformatted("One Life Mode (Experimental)");
++        ImGui::TextWrapped("One life for the entire campaign. Death means Game Over; Continue starts again at level 1. Rewind, saving and loading states are disabled.");
++        bool life_ready=m->in_session || launcher_model_can_launch(m);
++        ImGui::BeginDisabled(!life_ready);
++        if(ImGui::Button(sciv_one_life_active() ? "Restart One Life Mode" : "Start One Life Mode",ImVec2(-1,48))) {
++            sciv_one_life_start(); m->action=LNG_ACTION_LAUNCH;
++        }
++        ImGui::EndDisabled();
++        if(sciv_one_life_active() && m->in_session && ImGui::Button("Exit One Life Mode to Title",ImVec2(-1,40))) {
++            sciv_one_life_stop(); sciv_boss_rush_stop(); m->action=LNG_ACTION_LAUNCH;
++        }
++        ImGui::EndDisabled();
++        ImGui::Spacing(); ImGui::Separator();
++        ImGui::TextUnformatted("Other Castle (Easy)");
++        ImGui::TextWrapped("Play the Other Castle ROM hack using your patched ROM. Other Castle has separate saves; stock campaign achievements and gameplay modes apply to the original game.");
++        static char castle_error[256]={0};
++        ImGui::TextWrapped("ROM: %s",sciv_other_castle_path(1)[0] ? sciv_other_castle_path(1) : "Choose a patched ROM");
++        if(ImGui::Button("Choose Other Castle ROM",ImVec2(-1,36))) {
++            const char *patterns[]={"*.sfc","*.smc"}; char path[4096];
++            if(launcher_pick_file("Other Castle patched ROM",patterns,2,"SNES ROM",path,sizeof(path))) {
++                sciv_other_castle_set_path(1,path); castle_error[0]=0;
++            }
++        }
++        if(ImGui::Button(sciv_other_castle_active() ? "Restart Other Castle" : "Play Other Castle",ImVec2(-1,48))) {
++            if(sciv_other_castle_launch(1,castle_error,sizeof(castle_error))) m->action=LNG_ACTION_QUIT;
++        }
++        if(sciv_other_castle_active()) {
++            if(ImGui::Button("Choose Original USA ROM",ImVec2(-1,36))) {
++                const char *patterns[]={"*.sfc","*.smc"}; char path[4096];
++                if(launcher_pick_file("Original USA ROM",patterns,2,"SNES ROM",path,sizeof(path))) sciv_other_castle_set_path(0,path);
++            }
++            if(ImGui::Button("Return to Original Game",ImVec2(-1,40))) {
++                if(sciv_other_castle_launch(0,castle_error,sizeof(castle_error))) m->action=LNG_ACTION_QUIT;
++            }
++        }
++        if(castle_error[0]) ImGui::TextWrapped("%s",castle_error);
++        ImGui::TextWrapped("Starting replaces the current session. Save first if you want to return to it.");
++        ImGui::Spacing(); ImGui::Separator();
++    }
++    else if(page==7) {
++        bool on=sciv_achievements_enabled()!=0;
++        if(ImGui::Checkbox("Enable achievements",&on)) sciv_achievements_set_enabled(on);
++        ImGui::TextWrapped("Progress is stored locally. Disabling preserves earned achievements. Reset clears progress so you can earn them again.");
++        int unlocked=0;
++        for(int i=0;i<SCIV_ACHIEVEMENT_COUNT;i++) unlocked+=sciv_achievement_unlocked(i);
++        ImGui::Text("%d / %d unlocked     %u / 593 G",unlocked,SCIV_ACHIEVEMENT_COUNT,sciv_achievements_score());
++        if(ImGui::Button("Reset achievements...")) ImGui::OpenPopup("Reset achievements?");
++        ImGui::SetNextWindowPos(ImVec2(size.x*.5f,size.y*.5f),ImGuiCond_Always,ImVec2(.5f,.5f));
++        ImGui::SetNextWindowSize(ImVec2(std::min(440.f,size.x-40.f),0),ImGuiCond_Always);
++        if(ImGui::BeginPopupModal("Reset achievements?",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
++            ImGui::TextWrapped("Clear all locally earned achievements and score? Start a new game or Boss Rush to attempt the full-run challenges again.");
++            if(ImGui::Button("Reset all progress")) { if(sciv_achievements_reset()) ImGui::CloseCurrentPopup(); }
++            ImGui::SameLine();
++            if(ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
++            ImGui::EndPopup();
++        }
++        if(sciv_achievements_error()[0]) ImGui::TextWrapped("%s",sciv_achievements_error());
++        ImGui::BeginChild("##achievements",ImVec2(0,0),ImGuiChildFlags_Borders);
++        for(int i=0;i<SCIV_ACHIEVEMENT_COUNT;i++) {
++            const auto *a=sciv_achievement(i);
++            bool earned=sciv_achievement_unlocked(i)!=0;
++            ImGui::PushID(i);
++            if(!a->id && s_sciv_achievement_card.id) ImGui::Image(tid(s_sciv_achievement_card),ImVec2(48,48),ImVec2(.099f,.359f),ImVec2(.194f,.674f));
++            else if(s_sciv_badges[i].id) ImGui::Image(tid(s_sciv_badges[i]),ImVec2(48,48),ImVec2(0,0),ImVec2(1,1),ImVec4(1,1,1,earned ? 1.f : .4f),ImVec4(0,0,0,0));
++            else ImGui::Dummy(ImVec2(48,48));
++            ImGui::SameLine(); ImGui::BeginGroup();
++            ImGui::TextColored(earned ? ImVec4(1,.78f,.3f,1) : ImVec4(.75f,.75f,.8f,1),"%s   %u G",a->name,a->points);
++            ImGui::PushTextWrapPos(ImGui::GetWindowWidth()-15);
++            ImGui::TextUnformatted(a->description);
++            ImGui::PopTextWrapPos();
++            ImGui::TextDisabled("%s",earned ? "Unlocked" : "Locked");
++            ImGui::EndGroup(); ImGui::Separator(); ImGui::PopID();
++        }
++        ImGui::EndChild();
++    }
++    ImGui::EndChild();
++    bool skip_launcher=m->s.skip_launcher!=0;
++    if(ImGui::Checkbox("Skip launcher on boot",&skip_launcher))
++        m->s.skip_launcher=skip_launcher ? 1 : 0;
++    if(ImGui::IsItemHovered())
++        ImGui::SetTooltip("Start directly in the game next time. Open the in-game settings to show the launcher again.");
++    ImGui::TextDisabled(page==5 && m->in_session ? "D-pad: Navigate    A: Choose    Left / B: Menu    Esc: Resume" : "D-pad / Stick: Navigate    A: Select    B / Esc: Resume");
++    ImGui::End();
++    if(s_sciv_open_prompt) {
++        ImGui::OpenPopup("Save State Actions");
++        s_sciv_open_prompt = false;
++    }
++    ImGui::SetNextWindowPos(ImVec2(size.x*.5f,size.y*.5f),ImGuiCond_Always,ImVec2(.5f,.5f));
++    ImGui::SetNextWindowSize(ImVec2(std::min(430.f,size.x-40.f),std::min(360.f,size.y-40.f)),ImGuiCond_Always);
++    if(ImGui::BeginPopupModal("Save State Actions",nullptr,ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings)) {
++        char info[96];
++        bool occupied=snes_savestate_menu_slot_info(s_sciv_prompt_slot,info,sizeof(info))!=0;
++        ImGui::Text("Slot %02d",s_sciv_prompt_slot+1);
++        ImGui::TextUnformatted(info);
++        ImGui::Separator();
++        bool appearing=ImGui::IsWindowAppearing();
++        if(s_sciv_focus_prompt) ImGui::SetWindowFocus();
++        auto mark_choice = [&](int choice) {
++            if(s_sciv_prompt_choice==choice)
++                ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(),ImGui::GetItemRectMax(),IM_COL32(255,199,50,255),6,0,2);
++        };
++        if(!occupied) ImGui::BeginDisabled();
++        if((appearing || s_sciv_focus_prompt) && s_sciv_prompt_choice==0 && occupied) ImGui::SetKeyboardFocusHere();
++        if(((ImGui::Button("Load",ImVec2(-1,42)) && !appearing) || s_sciv_prompt_action==0) && occupied) {
++            if(snes_savestate_menu_submit_slot(s_sciv_prompt_slot,0)) {
++                m->action=LNG_ACTION_LAUNCH;
++                s_sciv_close_prompt = true;
++            } else snprintf(s_sciv_save_status,sizeof(s_sciv_save_status),"Load failed for slot %02d.",s_sciv_prompt_slot+1);
++        }
++        mark_choice(0);
++        if(!occupied) ImGui::EndDisabled();
++        if((appearing || s_sciv_focus_prompt) && s_sciv_prompt_choice==1) ImGui::SetKeyboardFocusHere();
++        if((ImGui::Button(occupied ? "Overwrite Save" : "Save",ImVec2(-1,42)) && !appearing) || s_sciv_prompt_action==1) {
++            bool ok=snes_savestate_menu_submit_slot(s_sciv_prompt_slot,1)!=0;
++            snprintf(s_sciv_save_status,sizeof(s_sciv_save_status),ok ? "Saved slot %02d." : "Save failed for slot %02d.",s_sciv_prompt_slot+1);
++            if(ok) s_sciv_close_prompt = true;
++        }
++        mark_choice(1);
++        if((appearing || s_sciv_focus_prompt) && s_sciv_prompt_choice==2) ImGui::SetKeyboardFocusHere();
++        if((ImGui::Button("Back",ImVec2(-1,42)) && !appearing) || s_sciv_prompt_action==2) s_sciv_close_prompt = true;
++        mark_choice(2);
++        s_sciv_prompt_action=-1;
++        s_sciv_focus_prompt=false;
++        if(s_sciv_save_status[0]) ImGui::TextWrapped("%s",s_sciv_save_status);
++        ImGui::TextDisabled("A: Select    B / Escape: Back");
++        if(s_sciv_close_prompt) {
++            ImGui::CloseCurrentPopup();
++            s_sciv_close_prompt = false;
++            s_sciv_prompt = false;
++            s_sciv_slots_active = true;
++            s_sciv_focus_slots = true;
++        }
++        ImGui::EndPopup();
++    }
++    ImGui::PopStyleVar(2); ImGui::PopStyleColor(8);
++    draw_standalone_builtin_rom_picker(m,th);
++}
++
++static const char* sciv_rewind_config(void) {
++    return g_launcher_config_path && g_launcher_config_path[0] ? g_launcher_config_path : "config.ini";
++}
++static void sciv_rewind_pad_label(char *out,size_t cap) {
++    snprintf(out,cap,"L2");
++    FILE *f=fopen(sciv_rewind_config(),"r");
++    if(!f) return;
++    char line[256]; bool section=false;
++    while(fgets(line,sizeof(line),f)) {
++        if(line[0]=='[') {section=!strncmp(line,"[GamepadMap]",12);continue;}
++        if(!section) continue;
++        char key[64],value[96]={0};
++        if(sscanf(line," %63[^= ] = %95[^\r\n]",key,value)>=1 && !strcmp(key,"Rewind")) {
++            snprintf(out,cap,"%s",value[0] ? value : "Unbound");break;
++        }
++    }
++    fclose(f);
++}
++static bool sciv_rewind_capture_event(LauncherModel *m,const SDL_Event &ev) {
++    if(!s_sciv_rewind_pad_capture) return false;
++    if(m->capturing || m->hk_capturing || m->view!=LNG_VIEW_CONTROLLER) {
++        s_sciv_rewind_pad_capture=false;return false;
++    }
++    const char *token=nullptr;
++    if(ev.type==SDL_EVENT_KEY_DOWN) {
++        if(ev.key.key==SDLK_ESCAPE) {s_sciv_rewind_pad_capture=false;return true;}
++        if(ev.key.key==SDLK_BACKSPACE) token="";
++        else return true;
++    }
++    if(ev.type==SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
++        static const char *names[]={"A","B","X","Y","Back","Guide","Start","L3","R3","Lb","Rb","DpadUp","DpadDown","DpadLeft","DpadRight"};
++        if(ev.gbutton.button>=0 && ev.gbutton.button<15) token=names[ev.gbutton.button];
++    }
++    if(ev.type==SDL_EVENT_GAMEPAD_AXIS_MOTION && ev.gaxis.value>16000) {
++        if(ev.gaxis.axis==SDL_GAMEPAD_AXIS_LEFT_TRIGGER) token="L2";
++        if(ev.gaxis.axis==SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) token="R2";
++    }
++    if(token) {
++        launcher_ini_kv_write(sciv_rewind_config(),"GamepadMap","Rewind",token);
++        s_sciv_rewind_pad_capture=false;
++    }
++    return ev.type==SDL_EVENT_GAMEPAD_BUTTON_DOWN || ev.type==SDL_EVENT_GAMEPAD_BUTTON_UP || ev.type==SDL_EVENT_GAMEPAD_AXIS_MOTION || ev.type==SDL_EVENT_KEY_UP;
++}
++static void draw_sciv_rewind(LauncherModel *m,const LauncherTheme &th) {
++    if(!m->has_rewind_depth) return;
++    if(begin_panel("sciv-rewind",0)) {
++        ImGui::TextColored(col(th.accent2),"REWIND");
++        bool enabled=m->s.rewind_enabled!=0;
++        if(ImGui::Checkbox("Enable rewind",&enabled)) {
++            launcher_model_toggle_rewind_enabled(m);
++            launcher_ini_kv_write(sciv_rewind_config(),"Rewind","Enabled",enabled ? "1" : "0");
++        }
++        ImGui::TextWrapped("Hold your rewind binding to move back through gameplay. Release it to resume. Bindings stay saved when rewind is disabled.");
++        ImGui::Spacing();
++        ImGui::TextUnformatted("Keyboard"); ImGui::SameLine(px(150));
++        const bool key_capture=m->hk_capturing && m->capture_hk==LNG_HK_REWIND;
++        const char *key=m->hotkeys[LNG_HK_REWIND];
++        if(ImGui::Button(key_capture ? "Press a key..." : key[0] ? key : "Unbound",ImVec2(px(220),px(36)))) {
++            s_sciv_rewind_pad_capture=false;
++            launcher_model_begin_hk_capture(m,LNG_HK_REWIND);
++        }
++        ImGui::TextUnformatted("Controller"); ImGui::SameLine(px(150));
++        char label[96];sciv_rewind_pad_label(label,sizeof(label));
++        if(ImGui::Button(s_sciv_rewind_pad_capture ? "Press button / trigger..." : label,ImVec2(px(220),px(36)))) {
++            launcher_model_cancel_capture(m);
++            launcher_model_cancel_hk_capture(m);
++            s_automap_i=s_automap_player=-1;
++            s_sciv_rewind_pad_capture=true;
++        }
++        if(key_capture || s_sciv_rewind_pad_capture)
++            ImGui::TextColored(col(th.accent2),"Esc cancels. Backspace clears the binding.");
++    } end_panel();
++}
++
++// The remapping editor shares the game's artwork, palette and navigation.
++static void draw_sciv_controls(LauncherModel *m, const LauncherTheme &base) {
++    const ImVec2 size=ImGui::GetIO().DisplaySize;
++    auto *bg=ImGui::GetBackgroundDrawList();
++    if(g_sciv_background.id) {
++        const float scale=std::max(size.x/2048.f,size.y/1470.f);
++        const ImVec2 extent(2048.f*scale,1470.f*scale);
++        const ImVec2 origin((size.x-extent.x)*.5f,(size.y-extent.y)*.5f);
++        bg->AddImage(tid(g_sciv_background),origin,ImVec2(origin.x+extent.x,origin.y+extent.y));
++    }
++    bg->AddRectFilled(ImVec2(0,0),size,IM_COL32(7,5,18,130));
++    LauncherTheme th=base;
++    th.panel=lng_rgba(.055f,.035f,.08f,.96f);
++    th.border=lng_rgba(.45f,.30f,.18f,1);
++    th.accent=lng_rgba(.65f,.10f,.14f,1);
++    th.accent2=lng_rgba(1,.78f,.3f,1);
++    th.text_muted=lng_rgba(.83f,.78f,.68f,1);
++    th.focus_ring=th.accent2;
++    const float width=std::min(size.x*.94f,px(1120));
++    ImGui::SetNextWindowPos(ImVec2((size.x-width)*.5f,size.y*.04f),ImGuiCond_Always);
++    ImGui::SetNextWindowSize(ImVec2(width,size.y*.92f),ImGuiCond_Always);
++    ImGui::PushStyleColor(ImGuiCol_WindowBg,ImVec4(.035f,.025f,.065f,.96f));
++    ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(.30f,.045f,.065f,1));
++    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,ImVec4(.50f,.08f,.11f,1));
++    ImGui::PushStyleColor(ImGuiCol_ButtonActive,ImVec4(.65f,.10f,.14f,1));
++    ImGui::PushStyleColor(ImGuiCol_Header,ImVec4(.40f,.07f,.10f,1));
++    ImGui::PushStyleColor(ImGuiCol_NavCursor,ImVec4(1,.78f,.3f,1));
++    ImGui::PushStyleColor(ImGuiCol_FrameBg,ImVec4(.16f,.10f,.16f,1));
++    ImGui::PushStyleColor(ImGuiCol_SliderGrab,ImVec4(1,.78f,.3f,1));
++    ImGui::PushStyleColor(ImGuiCol_ChildBg,ImVec4(.055f,.035f,.08f,.96f));
++    ImGui::PushStyleColor(ImGuiCol_CheckMark,ImVec4(1,.78f,.3f,1));
++    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,16);
++    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,6);
++    ImGui::Begin("##sciv-controls",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings);
++    if(ImGui::Button("Back to Controls",ImVec2(px(180),px(36))) ||
++       (!m->capturing && !m->hk_capturing && !s_sciv_rewind_pad_capture && ImGui::IsKeyPressed(ImGuiKey_Escape))) {
++        launcher_model_cancel_capture(m);
++        launcher_model_cancel_hk_capture(m);
++        s_sciv_rewind_pad_capture=false;
++        s_automap_i=s_automap_player=-1;
++        s_sciv_page=3;
++        s_sciv_focus_options=true;
++        launcher_model_set_view(m,LNG_VIEW_DASHBOARD);
++    }
++    ImGui::SameLine();
++    ImGui::TextColored(ImVec4(1,.78f,.3f,1),"CONTROL CONFIGURATION");
++    ImGui::Separator();
++    ImGui::BeginChild("##sciv-binding-editor",ImVec2(0,-px(40)),ImGuiChildFlags_NavFlattened);
++    draw_sciv_rewind(m,th);
++    draw_controller_config_view(m,th);
++    ImGui::EndChild();
++    ImGui::TextColored(ImVec4(.83f,.78f,.68f,1),"Arrows / D-pad: navigate   Enter / A: select   Esc: cancel capture");
++    ImGui::End();
++    ImGui::PopStyleVar(2);
++    ImGui::PopStyleColor(10);
++}

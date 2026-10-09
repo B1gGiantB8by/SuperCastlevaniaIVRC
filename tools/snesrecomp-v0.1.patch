@@ -1,0 +1,1250 @@
+diff --git a/host/snesrecomp_codegen_host.c b/host/snesrecomp_codegen_host.c
+index 13040e4..7199ae8 100644
+--- a/host/snesrecomp_codegen_host.c
++++ b/host/snesrecomp_codegen_host.c
+@@ -1721,7 +1721,11 @@ void snesrecomp_codegen_host_autowire(RecompLauncherCGameInfo* gi,
+     /* The CMake target and the relaunch binary are the same name by
+      * construction: the scaffolder names the executable after the target.
+      * Every other field stays NULL so apply()'s defaults own the layout. */
++#ifdef SNESRECOMP_CMAKE_TARGET_NAME
++    cfg.cmake_target = SNESRECOMP_CMAKE_TARGET_NAME;
++#else
+     cfg.cmake_target = exe_name;
++#endif
+     cfg.exe_basename = exe_name;
+     /* Game ports seed generation from bank .cfg roots; the scaffolder emits
+      * them, so this is the scaffold default rather than a per-title choice. */
+diff --git a/recompiler/v2/atomic_output.py b/recompiler/v2/atomic_output.py
+index fcb3ddb..e618b38 100644
+--- a/recompiler/v2/atomic_output.py
++++ b/recompiler/v2/atomic_output.py
+@@ -6,6 +6,7 @@ import atexit
+ import os
+ import pathlib
+ import shutil
++import subprocess
+ import tempfile
+ 
+ 
+@@ -30,6 +31,14 @@ class AtomicOutputDir:
+             prefix=f".{self.target.name}.snesrecomp-staging-",
+             dir=str(self.parent))
+         self.staging = pathlib.Path(raw)
++        if os.name == "nt":
++            # mkdtemp restricts Windows ACLs to its creator. Published sources
++            # must retain the project's permissions so a launcher running as
++            # another authorized account can regenerate the tree later.
++            subprocess.run(
++                ["icacls", str(self.staging), "/inheritance:e"],
++                check=True, capture_output=True,
++                creationflags=subprocess.CREATE_NO_WINDOW)
+         if self.target.exists():
+             self._link_existing_tree(self.target, self.staging)
+         atexit.register(self.cleanup)
+diff --git a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+index e5e264f..5546aa9 100644
+--- a/recompiler/v2/emit_function.py
++++ b/recompiler/v2/emit_function.py
+@@ -2179,7 +2179,12 @@ def emit_function(rom: bytes, bank: int, start: int,
+     src.append("  RecompStackPop();")
+     src.append("  return RECOMP_RETURN_NORMAL;")
+     src.append("}")
+-    return "\n".join(src) + "\n"
++    # Apply the same optional CPU clock budget to static blocks, branch/DP
++    # penalties and block moves. Hardware DMA/beam clocks remain unscaled.
++    import re
++    source = "\n".join(src) + "\n"
++    return re.sub(r"cpu->master_cycles \+= ([^;]+);",
++                  r"cpu->master_cycles += snes_cpu_timing_clocks(\1);", source)
+ 
+ 
+ def _reg_for_flag(flag) -> str:
+diff --git a/runner/src/beam_frame_driver.c b/runner/src/beam_frame_driver.c
+index d6086b3..5b07e96 100644
+--- a/runner/src/beam_frame_driver.c
++++ b/runner/src/beam_frame_driver.c
+@@ -21,6 +21,7 @@
+ #include "snes/ppu.h"
+ #include "snes/sa1.h"
+ #include "snes/snes.h"
++#include "snes/saveload.h"
+ #include "snes/superfx.h"
+ 
+ extern CpuState g_cpu;
+@@ -269,3 +270,16 @@ void snes_beam_frame_driver_reset(void) {
+   s_resume_pc = 0;
+   s_wai_halted = false;
+ }
++
++void snes_beam_frame_driver_save_state(SaveLoadInfo *sli) {
++  uint8_t halted = s_wai_halted;
++  sli->func(sli, &s_resume_pc, sizeof(s_resume_pc));
++  sli->func(sli, &halted, sizeof(halted));
++}
++
++void snes_beam_frame_driver_load_state(SaveLoadInfo *sli) {
++  uint8_t halted = 0;
++  sli->func(sli, &s_resume_pc, sizeof(s_resume_pc));
++  sli->func(sli, &halted, sizeof(halted));
++  s_wai_halted = halted != 0;
++}
+diff --git a/runner/src/beam_frame_driver.h b/runner/src/beam_frame_driver.h
+index 60804fc..def964c 100644
+--- a/runner/src/beam_frame_driver.h
++++ b/runner/src/beam_frame_driver.h
+@@ -28,5 +28,8 @@ void snes_beam_frame_driver_draw_ppu_frame_observed(
+     SnesBeamRasterObserver *observer, void *context);
+ /* Forget the booted machine: the next frame starts from the reset vector. */
+ void snes_beam_frame_driver_reset(void);
++struct SaveLoadInfo;
++void snes_beam_frame_driver_save_state(struct SaveLoadInfo *sli);
++void snes_beam_frame_driver_load_state(struct SaveLoadInfo *sli);
+ 
+ #endif /* SNESRECOMP_BEAM_FRAME_DRIVER_H */
+diff --git a/runner/src/common_cpu_infra.c b/runner/src/common_cpu_infra.c
+index 2d1f2e0..4de2cd9 100644
+--- a/runner/src/common_cpu_infra.c
++++ b/runner/src/common_cpu_infra.c
+@@ -35,6 +35,7 @@
+ #endif
+ 
+ Snes *g_snes;
++unsigned snes_cpu_timing_divisor = 1;
+ Cpu *g_snes_cpu;
+ 
+ bool g_fail;
+diff --git a/runner/src/cpu_state.c b/runner/src/cpu_state.c
+index 57fe6bc..3b67e0c 100644
+--- a/runner/src/cpu_state.c
++++ b/runner/src/cpu_state.c
+@@ -754,7 +754,7 @@ void cpu_write16(CpuState *cpu, uint8 bank, uint16 addr, uint16 v) {
+  * a region boundary, e.g. $00:1FFF->$00:2000). */
+ uint8_t cpu_read8_paced(CpuState *cpu, uint8_t bank, uint16_t addr) {
+     uint32_t _sp = cpu_region_speed(((uint32_t)bank << 16) | addr);
+-    cpu->master_cycles += _sp;
++    cpu->master_cycles += snes_cpu_timing_clocks(_sp);
+     {
+         static int _pl = -1;
+         if (_pl < 0) _pl = getenv("SNESRECOMP_PACELOG") ? 1 : 0;
+@@ -770,7 +770,7 @@ uint8_t cpu_read8_paced(CpuState *cpu, uint8_t bank, uint16_t addr) {
+ uint16_t cpu_read16_paced(CpuState *cpu, uint8_t bank, uint16_t addr) {
+     uint32_t _sp = cpu_region_speed(((uint32_t)bank << 16) | addr) +
+         cpu_region_speed(((uint32_t)bank << 16) | (uint16_t)(addr + 1));
+-    cpu->master_cycles += _sp;
++    cpu->master_cycles += snes_cpu_timing_clocks(_sp);
+     {
+         static int _pl = -1;
+         if (_pl < 0) _pl = getenv("SNESRECOMP_PACELOG") ? 1 : 0;
+@@ -785,7 +785,7 @@ uint16_t cpu_read16_paced(CpuState *cpu, uint8_t bank, uint16_t addr) {
+ 
+ void cpu_write8_paced(CpuState *cpu, uint8_t bank, uint16_t addr, uint8_t v) {
+     uint32_t _sp = cpu_region_speed(((uint32_t)bank << 16) | addr);
+-    cpu->master_cycles += _sp;
++    cpu->master_cycles += snes_cpu_timing_clocks(_sp);
+     {
+         static int _pl = -1;
+         if (_pl < 0) _pl = getenv("SNESRECOMP_PACELOG") ? 1 : 0;
+@@ -801,7 +801,7 @@ void cpu_write8_paced(CpuState *cpu, uint8_t bank, uint16_t addr, uint8_t v) {
+ void cpu_write16_paced(CpuState *cpu, uint8_t bank, uint16_t addr, uint16_t v) {
+     uint32_t _sp = cpu_region_speed(((uint32_t)bank << 16) | addr) +
+         cpu_region_speed(((uint32_t)bank << 16) | (uint16_t)(addr + 1));
+-    cpu->master_cycles += _sp;
++    cpu->master_cycles += snes_cpu_timing_clocks(_sp);
+     {
+         static int _pl = -1;
+         if (_pl < 0) _pl = getenv("SNESRECOMP_PACELOG") ? 1 : 0;
+diff --git a/runner/src/cpu_state.h b/runner/src/cpu_state.h
+index f9b1e26..c2adf9a 100644
+--- a/runner/src/cpu_state.h
++++ b/runner/src/cpu_state.h
+@@ -1,5 +1,18 @@
+ #pragma once
+ 
++#include <stdint.h>
++/* Host preference; deliberately outside serialized architectural state. */
++#ifdef __cplusplus
++extern "C" {
++#endif
++extern unsigned snes_cpu_timing_divisor;
++static inline uint64_t snes_cpu_timing_clocks(uint64_t clocks) {
++    return snes_cpu_timing_divisor == 1 ? clocks : (clocks + 1) / 2;
++}
++#ifdef __cplusplus
++}
++#endif
++
+ /*
+  * snesrecomp v2 runtime CpuState.
+  *
+diff --git a/runner/src/desktop/host_main.c b/runner/src/desktop/host_main.c
+index 21a8bf3..e4ff7e3 100644
+--- a/runner/src/desktop/host_main.c
++++ b/runner/src/desktop/host_main.c
+@@ -389,6 +389,7 @@ static struct RendererFuncs g_renderer_funcs;
+ /* Set by the hotkeys; consumed once in the frame loop. */
+ static int g_savestate_menu_hotkey;
+ static int g_rewind_hotkey;
++static bool g_rewind_held;
+ static int g_open_launcher_hotkey;   /* in_game_launcher only */
+ static uint64_t g_state_generation;
+ 
+@@ -1213,7 +1214,8 @@ static void WritePpm(const char *path, const uint8 *pixel_buffer, int pitch,
+ static void DrawPpuFrameWithPerf(void) {
+   double profile_start = ProfileStart();
+   PreparePpuFrame();
+-  const int render_scale = 1;
++  int render_scale = g_game->overlay_scale ? g_game->overlay_scale() : 1;
++  if(render_scale<1 || render_scale>3) render_scale=1;
+   uint8 *present_buffer = 0;
+   int present_pitch = 0;
+ 
+@@ -1252,7 +1254,12 @@ static void DrawPpuFrameWithPerf(void) {
+ #endif
+ 
+   profile_start = ProfileStart();
+-  RtlDrawPpuFrame(pixel_buffer, pitch, g_ppu_render_flags);
++  if(render_scale>1) {
++    static uint32_t overlay_field[kSnesDesktopMaxFrameWidth*240];
++    RtlDrawPpuFrame((uint8_t *)overlay_field, g_snes_width*4, g_ppu_render_flags);
++    snes_ovl_upscale_frame(pixel_buffer,pitch,g_snes_width*render_scale,g_snes_height*render_scale,
++                         overlay_field,g_snes_width*4,g_snes_width,g_snes_height);
++  } else RtlDrawPpuFrame(pixel_buffer, pitch, g_ppu_render_flags);
+ #if defined(SNESRECOMP_HOST_HAS_BLEND)
+   /* The shared blend keeps the UNBLENDED frame, so the mix never feeds back
+    * on itself, and the PPU's own renderBuffer stays pure for thumbnails.
+@@ -1294,19 +1301,23 @@ static void DrawPpuFrameWithPerf(void) {
+    * is not executing. That is what locked Super Metroid up when the
+    * save-state browser was opened. */
+   {
+-    const int rows = g_snes_height * render_scale;
+-    const int row_bytes = g_snes_width * render_scale * 4;
++    const int rows = g_snes_height;
++    const int row_bytes = g_snes_width * 4;
+     if (rows > 0 && row_bytes > 0 &&
+         (size_t)rows * (size_t)row_bytes <= sizeof(g_frozen_frame)) {
+-      for (int y = 0; y < rows; y++)
+-        memcpy(g_frozen_frame + (size_t)y * (size_t)row_bytes,
+-               pixel_buffer + (size_t)y * (size_t)pitch, (size_t)row_bytes);
+-      g_frozen_w = g_snes_width * render_scale;
++      for (int y = 0; y < rows; y++) {
++        uint32_t *out=(uint32_t *)(g_frozen_frame+(size_t)y*row_bytes);
++        const uint32_t *in=(const uint32_t *)(pixel_buffer+(size_t)y*render_scale*pitch);
++        for(int x=0;x<g_snes_width;x++) out[x]=in[x*render_scale];
++      }
++      g_frozen_w = g_snes_width;
+       g_frozen_h = rows;
+     }
+   }
+   ComposeOsd(pixel_buffer, pitch, g_snes_width * render_scale,
+              g_snes_height * render_scale, 2);
++  if(g_game->compose_overlay) g_game->compose_overlay(pixel_buffer,pitch,
++      g_snes_width*render_scale,g_snes_height*render_scale);
+   /* Use the same completed simulation index as the common WRAM dumper. */
+   const uint32 dump_frame = snes_frame_counter ? snes_frame_counter - 1 : 0;
+   FrameDump_Present(dump_frame, pixel_buffer, pitch,
+@@ -1575,6 +1586,10 @@ typedef struct PadGesture {
+ } PadGesture;
+ static PadGesture g_rewind_gesture;
+ static PadGesture g_launcher_gesture;
++#ifdef SCIV_FRONTEND
++extern void sciv_open_save_states(void);
++static PadGesture g_sciv_save_gesture;
++#endif
+ 
+ /* Lower-cased `spec` into bits; returns the number of buttons, or -1 when a
+  * name is not a button. */
+@@ -1707,6 +1722,50 @@ static void OverlaySelftestPadAttach(void) {
+           g_selftest_pad ? "attached" : "FAILED to attach");
+   if (!g_selftest_pad) g_selftest_pad_failed = 1;
+ }
++#ifdef SCIV_FRONTEND
++/* Reuse the framework's virtual-controller regression harness in the new UI. */
++void sciv_selftest_controller_tick(unsigned frame) {
++  if (!g_selftest_pad || g_selftest_pad_phase != 1) return;
++  if (frame == 1) { SelftestPadReleaseAll(); g_selftest_pad_opened |= 1; }
++  if (HostGetenv("SAVE_MENU_SELFTEST_QUIT")) {
++    if (frame == 10) SelftestPadSet(SDL_CONTROLLER_BUTTON_DPAD_LEFT, true);
++    if (frame == 14) SelftestPadSet(SDL_CONTROLLER_BUTTON_DPAD_LEFT, false);
++    if (frame == 25) SelftestPadSet(SDL_CONTROLLER_BUTTON_DPAD_DOWN, true);
++    if (frame == 29) SelftestPadSet(SDL_CONTROLLER_BUTTON_DPAD_DOWN, false);
++    if (frame == 40) SelftestPadSet(SDL_CONTROLLER_BUTTON_A, true);
++    if (frame == 44) SelftestPadSet(SDL_CONTROLLER_BUTTON_A, false);
++    return;
++  }
++  if (HostGetenv("SAVE_MENU_SELFTEST_NAV")) {
++    const struct { unsigned frame; int button; bool held; } steps[] = {
++      {10, SDL_CONTROLLER_BUTTON_DPAD_LEFT, true}, {14, SDL_CONTROLLER_BUTTON_DPAD_LEFT, false},
++      {25, SDL_CONTROLLER_BUTTON_DPAD_UP, true}, {29, SDL_CONTROLLER_BUTTON_DPAD_UP, false},
++      {40, SDL_CONTROLLER_BUTTON_DPAD_RIGHT, true}, {44, SDL_CONTROLLER_BUTTON_DPAD_RIGHT, false},
++      {55, SDL_CONTROLLER_BUTTON_DPAD_DOWN, true}, {59, SDL_CONTROLLER_BUTTON_DPAD_DOWN, false},
++      {65, SDL_CONTROLLER_BUTTON_A, true}, {69, SDL_CONTROLLER_BUTTON_A, false},
++      {75, SDL_CONTROLLER_BUTTON_B, true}, {79, SDL_CONTROLLER_BUTTON_B, false},
++      {85, SDL_CONTROLLER_BUTTON_B, true}, {89, SDL_CONTROLLER_BUTTON_B, false},
++      {95, SDL_CONTROLLER_BUTTON_B, true}, {99, SDL_CONTROLLER_BUTTON_B, false},
++    };
++    for (size_t i=0; i<sizeof(steps)/sizeof(steps[0]); ++i)
++      if (frame==steps[i].frame) SelftestPadSet(steps[i].button,steps[i].held);
++    return;
++  }
++  if (frame == 10) SelftestPadSet(SDL_CONTROLLER_BUTTON_DPAD_DOWN, true);
++  if (frame == 14) SelftestPadSet(SDL_CONTROLLER_BUTTON_DPAD_DOWN, false);
++  if (frame == 25) SelftestPadSet(SDL_CONTROLLER_BUTTON_A, true);
++  if (frame == 29) SelftestPadSet(SDL_CONTROLLER_BUTTON_A, false);
++  if (HostGetenv("SAVE_MENU_SELFTEST_WRITE")) {
++    if (frame == 40 || frame == 55 || frame == 75 || frame == 85 || frame == 95) SelftestPadSet(SDL_CONTROLLER_BUTTON_A, true);
++    if (frame == 44 || frame == 59 || frame == 79 || frame == 89 || frame == 99) SelftestPadSet(SDL_CONTROLLER_BUTTON_A, false);
++    if (frame == 65) SelftestPadSet(SDL_CONTROLLER_BUTTON_DPAD_DOWN, true);
++    if (frame == 69) SelftestPadSet(SDL_CONTROLLER_BUTTON_DPAD_DOWN, false);
++    return;
++  }
++  if (frame == 75 || frame == 85 || frame == 95) SelftestPadSet(SDL_CONTROLLER_BUTTON_B, true);
++  if (frame == 79 || frame == 89 || frame == 99) SelftestPadSet(SDL_CONTROLLER_BUTTON_B, false);
++}
++#endif
+ /* Main-loop tick: presses the gestures on their frames, releases otherwise. */
+ static void OverlaySelftestPadMainTick(unsigned frame) {
+   static unsigned last_frame = ~0u;
+@@ -1720,6 +1779,14 @@ static void OverlaySelftestPadMainTick(unsigned frame) {
+     g_selftest_pad_phase = 1;
+     SelftestPadSet(SDL_CONTROLLER_BUTTON_BACK, true);
+     SelftestPadSet(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, true);
++#ifdef SCIV_FRONTEND
++  } else if (HostGetenv("SAVE_MENU_SELFTEST_REOPEN") &&
++             (long)frame == g_selftest_pad_frame + 30) {
++    fprintf(stderr, "[save-state menu test] reopening from Back+RB\n");
++    g_selftest_pad_phase = 1;
++    SelftestPadSet(SDL_CONTROLLER_BUTTON_BACK, true);
++    SelftestPadSet(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, true);
++#endif
+   } else if ((long)frame == g_selftest_pad_frame + 60) {
+     fprintf(stderr, "[overlay_selftest_pad] frame %u: holding Select+R3 on the pad\n", frame);
+     g_selftest_pad_phase = 2;
+@@ -1900,6 +1967,43 @@ static void RewindKeyDown(int key, int repeat) {
+   }
+ }
+ 
++static void HeldRewindKeyDown(int key, int repeat) {
++  (void)repeat;
++  if (key == SDLK_ESCAPE) g_rewind_held = false;
++}
++
++static int HeldRewindStep(void) {
++  if (!snes_rewind_pop((uint32_t *)g_my_pixels, g_snes_width, g_snes_height))
++    return 0;
++  DrawPpuFrameWithPerf();
++  return 1;
++}
++
++static void RunHeldRewindLoop(bool *running) {
++  unsigned steps = 0;
++  g_overlay_modal = true;
++  SetAudioPaused(true);
++  host_report_breadcrumb("hold rewind OPEN");
++  while (*running && g_rewind_held) {
++    PumpOverlayEvents(running, HeldRewindKeyDown);
++    /* A lost window or disconnected controller must never trap the guest. */
++    if (!(SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS))
++      g_rewind_held = false;
++    if (!*running || !g_rewind_held) break;
++    if (HeldRewindStep()) steps++;
++    SDL_Delay(16);
++  }
++  snes_rewind_close();
++  g_overlay_modal = false;
++  g_rewind_hotkey = 0;
++  ResetAudioTimeline();
++  SetAudioPaused(g_paused);
++  g_state_generation = RtlStateGeneration();
++  OverlayNoteClosed();
++  host_report_breadcrumb("hold rewind CLOSED after %u steps - guest resuming", steps);
++  GameReset();
++}
++
+ /* Rewind's modal pump. It needs its own: snes_rewind exposes step/commit/close
+  * rather than the browser's handle_key/poll_nav. Controls match the other
+  * ports: Left/Right scrub (hold to keep scrubbing), Enter or Space commits,
+@@ -2118,6 +2222,9 @@ static void SetAudioPaused(bool paused) {
+ 
+ static SDL_Renderer *g_renderer;
+ static SDL_Texture *g_texture;
++#ifdef SCIV_FRONTEND
++static SDL_Texture *g_bezel_texture;
++#endif
+ static SDL_Rect g_sdl_renderer_rect;
+ static SDL_Rect g_sdl_present_rect;
+ 
+@@ -2161,6 +2268,10 @@ static bool SdlRenderer_Init(SDL_Window *window) {
+ }
+ 
+ static void SdlRenderer_Destroy(void) {
++#ifdef SCIV_FRONTEND
++  SDL_DestroyTexture(g_bezel_texture);
++  g_bezel_texture = NULL;
++#endif
+   SDL_DestroyTexture(g_texture);
+   SDL_DestroyRenderer(g_renderer);
+ }
+@@ -2210,6 +2321,30 @@ static void SdlRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pi
+ static void SdlRenderer_EndDraw(void) {
+   SDL_UnlockTexture(g_texture);
+   SDL_RenderClear(g_renderer);
++#ifdef SCIV_FRONTEND
++  extern int sciv_bezel_enabled(void);
++
++  if (sciv_bezel_enabled() && !g_bezel_texture) {
++    SDL_Surface *s = SDL_LoadBMP("assets/castlevania/bezel.bmp");
++    if (s) {
++      g_bezel_texture = SDL_CreateTextureFromSurface(g_renderer, s);
++#if defined(SNESRECOMP_SDL3)
++      SDL_DestroySurface(s);
++#else
++      SDL_FreeSurface(s);
++#endif
++    }
++  }
++  if (sciv_bezel_enabled() && g_bezel_texture) {
++    int w, h; SdlRenderer_GetOutputSize(&w, &h);
++    SDL_Rect src = {0, 0, 300, 1024};
++    SDL_Rect dst = {0, 0, g_sdl_present_rect.x, h};
++    if (dst.w > 0) snesrecomp_sdl_render_texture(g_renderer, g_bezel_texture, &src, &dst);
++    src.x = 1236; dst.x = g_sdl_present_rect.x + g_sdl_present_rect.w;
++    dst.w = w - dst.x;
++    if (dst.w > 0) snesrecomp_sdl_render_texture(g_renderer, g_bezel_texture, &src, &dst);
++  }
++#endif
+   /* SDL3's SDL_RenderTexture takes SDL_FRect, not SDL_Rect. */
+   snesrecomp_sdl_render_texture(g_renderer, g_texture, &g_sdl_renderer_rect,
+                                 &g_sdl_present_rect);
+@@ -2843,10 +2978,40 @@ static void RunInGameLauncher(bool *running, const char **exit_reason) {
+     }
+   }
+   free(mods_before);
++#ifdef SCIV_FRONTEND
++  /* The launcher consumes releases while the host's event pump is stopped.
++   * Reconcile physical state before returning, with system hotkeys suppressed. */
++  SDL_PumpEvents();
++  g_pad_buttons = 0;
++  g_input_state = 0;
++  for (int seat = 0; seat < 2; ++seat) {
++    GamepadInfo *pad = &g_gamepad[seat];
++    pad->modifiers = 0;
++    pad->axis_buttons = 0;
++    memset(pad->last_cmd, 0, sizeof(pad->last_cmd));
++    if (pad->joystick_id == -1) continue;
++#if SNESRECOMP_SDL3
++    SDL_Gamepad *physical = SDL_GetGamepadFromID(pad->joystick_id);
++    if (!physical) continue;
++    for (int button = 0; button < 15; ++button) {
++      int mapped = RemapSdlButton(button);
++      if (mapped >= 0) HandleGamepadInput(pad, mapped,
++          SDL_GetGamepadButton(physical, (SDL_GamepadButton)button));
++    }
++    HandleGamepadAxisInput(pad, SDL_GAMEPAD_AXIS_LEFTX,
++                          SDL_GetGamepadAxis(physical, SDL_GAMEPAD_AXIS_LEFTX));
++    HandleGamepadAxisInput(pad, SDL_GAMEPAD_AXIS_LEFTY,
++                          SDL_GetGamepadAxis(physical, SDL_GAMEPAD_AXIS_LEFTY));
++#endif
++  }
++  g_launcher_gesture.was_held = true;
++  g_sciv_save_gesture.was_held = true;
++#endif
+   g_overlay_modal = false;
+   ResetAudioTimeline();
+   SetAudioPaused(g_paused);
+   OverlayNoteClosed();
++  GameReset();
+   g_reset_clock = true;
+ #endif
+ }
+@@ -3032,6 +3197,15 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
+   if (game->in_game_launcher)
+     PadGestureConfigure(&g_launcher_gesture, g_config.launcher_gesture,
+                         "Select+L3", "launcher", "LauncherGesture");
++#ifdef SCIV_FRONTEND
++  PadGestureConfigure(&g_sciv_save_gesture, "Select+R", "Select+R",
++                      "save states", "SaveStateGesture");
++  /* Physical Back + RB: independent of gameplay button remapping. */
++  g_sciv_save_gesture.pad = 0;
++  g_sciv_save_gesture.raw = (1u << kGamepadBtn_Back) | (1u << kGamepadBtn_R1);
++  PadGestureConfigure(&g_launcher_gesture, "L3+R3", "L3+R3",
++                      "launcher", "LauncherGesture");
++#endif
+   tier2_capture_configure(args.expose_coverage_mod || g_config.expose_coverage_mod,
+                           g_config.coverage_capture, args.coverage_capture);
+ 
+@@ -3582,6 +3756,9 @@ error_reading:;
+ 
+   /* Rewind ring: reads the env overrides and reserves slot headers; the
+    * buffer itself is allocated lazily on the first capture. */
++  snes_rewind_set_hold_mode(game->hold_rewind);
++  if (game->hold_rewind && !game->rewind_settings)
++    snes_rewind_set_defaults(1, 300, 3);
+   snes_rewind_configure();
+   /* SNESRECOMP_OSD_FPS=1 (or [General] DisplayPerfInTitle): start with the
+    * FPS readout up. */
+@@ -3629,6 +3806,12 @@ error_reading:;
+         }
+         break;
+       case SDL_KEYDOWN:
++#ifdef SCIV_FRONTEND
++        if (SNESRECOMP_SDL_EVENT_KEY(event) == SDLK_ESCAPE) {
++          if (!SNESRECOMP_SDL_EVENT_REPEAT(event)) g_open_launcher_hotkey = 1;
++          break;
++        }
++#endif
+ #if defined(SNES_HAS_LOBBY_CLIENT)
+         if (g_netplay_session && SNESRECOMP_SDL_EVENT_KEY(event) == SDLK_ESCAPE) {
+           g_netplay_exit_requested = 1;
+@@ -3920,6 +4103,32 @@ error_reading:;
+         g_open_launcher_hotkey = 1;
+       }
+     }
++    /* Opt-in regression of the same step used by the held-key/controller
++     * loop, with real whole-machine snapshots and the active view width. */
++    {
++      static long rewind_test_frame = -2;
++      if (rewind_test_frame == -2) {
++        const char *v = HostGetenv("HOLD_REWIND_SELFTEST");
++        rewind_test_frame = v ? strtol(v, NULL, 0) : -1;
++      }
++      if (game->hold_rewind && rewind_test_frame >= 0 &&
++          (long)frameCtr == rewind_test_frame) {
++        rewind_test_frame = -1;
++        unsigned steps = 0;
++        if (snes_rewind_open()) {
++          SetAudioPaused(true);
++          while (steps < 20 && HeldRewindStep()) ++steps;
++          snes_rewind_close();
++          g_state_generation = RtlStateGeneration();
++          ResetAudioTimeline();
++          SetAudioPaused(g_paused);
++          GameReset();
++        }
++        fprintf(stderr, "[hold_rewind_selftest] width=%d steps=%u restored_frame=%u\n",
++                g_snes_width, steps, (unsigned)snes_frame_counter);
++        if (steps != 20) { g_script_failed = 1; running = false; }
++      }
++    }
+     if (game->in_game_launcher &&
+         (g_open_launcher_hotkey || PadGesturePressed(&g_launcher_gesture)) &&
+         !snes_rewind_is_open() && !snes_savestate_menu_is_open()) {
+@@ -3931,17 +4140,33 @@ error_reading:;
+     g_open_launcher_hotkey = 0;
+     if ((g_rewind_hotkey || PadGesturePressed(&g_rewind_gesture)) && !snes_rewind_is_open() &&
+         !snes_savestate_menu_is_open()) {
++      /* Consume before the modal loop: the continue below bypasses the
++       * normal reset, otherwise committing/cancelling immediately reopens. */
++      g_rewind_hotkey = 0;
+       /* Refused during netplay by snes_rewind_open() itself: one machine
+        * cannot move its own clock backwards while a peer is watching. */
+       if (snes_rewind_open()) {
+-        RunRewindLoop(&running);
++        if (game->hold_rewind && g_rewind_held)
++          RunHeldRewindLoop(&running);
++        else
++          RunRewindLoop(&running);
+         continue;   /* guest was frozen: no frame to run or present */
+       }
+     }
+     g_rewind_hotkey = 0;
+     /* Exactly ONE poll_open per frame: it latches the previous word to edge
+      * detect on, so a second call in the same frame eats the edge. */
++#ifdef SCIV_FRONTEND
++    if (g_savestate_menu_hotkey || PadGesturePressed(&g_sciv_save_gesture)) {
++      g_savestate_menu_hotkey = 0;
++      sciv_open_save_states();
++      RunInGameLauncher(&running, &exit_reason);
++      GameReset();
++      continue;
++    }
++#else
+     (void)snes_savestate_menu_poll_open(human);
++#endif
+     if (g_savestate_menu_hotkey) {
+       g_savestate_menu_hotkey = 0;
+       if (!snes_savestate_menu_is_open())
+@@ -3964,6 +4189,42 @@ error_reading:;
+       break;
+     }
+     inputs |= debug_server_get_controller_inputs();
++    int title_freeze = 0;
++    if (game->filter_menu_input) {
++      Config title_before = g_config;
++      int action = 0;
++      inputs = game->filter_menu_input(inputs, &action, &title_freeze);
++#ifdef RECOMP_LAUNCHER
++      if (memcmp(&title_before, &g_config, sizeof(Config)) != 0) {
++        WriteConfigFile(g_active_config_file);
++        ApplyVolume();
++        ApplyLiveSettings(&title_before);
++        /* Backend/audio-device changes use the same saved-machine restart
++         * as the in-game launcher; ordinary edits apply on this frame. */
++        if (g_config.output_method != title_before.output_method ||
++            strcmp(g_config.renderer, title_before.renderer) != 0 ||
++            g_config.enable_audio != title_before.enable_audio) {
++          if (snesrecomp_abspath("saves/resume.sav", g_relaunch.state,
++                                sizeof(g_relaunch.state)) &&
++              RtlSaveSnapshot(g_relaunch.state)) {
++            snprintf(g_relaunch.rom, sizeof(g_relaunch.rom), "%s", g_rom_path);
++            g_relaunch.with_state = g_relaunch.pending = true;
++            running = false;
++            exit_reason = "title menu: restarting to apply a setting";
++            break;
++          }
++          /* Keep the live device consistent if no resume state can be made. */
++          g_config.output_method = title_before.output_method;
++          snprintf(g_config.renderer, sizeof(g_config.renderer), "%s", title_before.renderer);
++          g_config.enable_audio = title_before.enable_audio;
++          WriteConfigFile(g_active_config_file);
++          host_report_breadcrumb("title menu: unable to save device-change resume state");
++        }
++      }
++#endif
++      if (action == 1) { g_open_launcher_hotkey = 1; continue; }
++      if (action == 2) { running = false; exit_reason = "title menu quit"; break; }
++    }
+     double profile_start = ProfileStart();
+     double guest_start = MonotonicSeconds();
+     if (game->before_run_frame) game->before_run_frame();
+@@ -3977,7 +4238,8 @@ error_reading:;
+     bool runahead_captured = false;
+     {
+       const uint32 word = inputs | GetActiveControllers() | debug_server_get_controller_active_mask();
+-      if (g_turbo || !snes_runahead_run_frame(word))
++      if (title_freeze) { /* Preserve the native title raster. */ }
++      else if (g_turbo || !snes_runahead_run_frame(word))
+         RtlRunFrame(word);
+       else
+         runahead_captured = true;   /* it rasterised the speculated frame */
+@@ -4203,6 +4465,12 @@ static void HandleCommand(uint32 j, bool pressed) {
+     }
+   }
+ 
++  if (j == kKeys_Rewind) {
++    g_rewind_held = pressed;
++    if (pressed) g_rewind_hotkey = 1;
++    return;
++  }
++
+   if (j == kKeys_Turbo) {
+     g_turbo = pressed;
+     return;
+@@ -4411,7 +4679,7 @@ static void SetPadButtonOrFallthrough(uint32 j, bool pressed) {
+     g_pad_buttons = pressed ? (g_pad_buttons | m) : (g_pad_buttons & ~m);
+     return;
+   }
+-  if (g_overlay_modal)
++  if (g_overlay_modal && j != kKeys_Rewind)
+     return;   /* a panel owns the screen: no state loads behind it */
+   HandleCommand(j, pressed);
+ }
+diff --git a/runner/src/desktop/host_main.h b/runner/src/desktop/host_main.h
+index 03b6f06..2698979 100644
+--- a/runner/src/desktop/host_main.h
++++ b/runner/src/desktop/host_main.h
+@@ -61,6 +61,7 @@ typedef struct SnesDesktopHostFrameStats {
+ } SnesDesktopHostFrameStats;
+ 
+ typedef struct SnesDesktopHostGame {
++  bool hold_rewind;             /* Hold the rewind shortcut; release to resume. */
+   /* ── Identity ─────────────────────────────────────────────────────────── */
+   const char *display_name;      /* "Super Metroid" (report header, launcher) */
+   const char *window_title;      /* NULL: "<display_name> (Recompiled)" */
+@@ -197,6 +198,13 @@ typedef struct SnesDesktopHostGame {
+   /* After the gameplay loop ends, before SDL resources are destroyed or a
+    * relaunch begins. Stop title-owned workers here. No further frames run. */
+   void (*on_shutdown)(void);
++  /* Optional CPU overlay, after the game raster and before presentation.
++   * Request 1..3x output to keep overlay text readable on a native field. */
++  int (*overlay_scale)(void);
++  void (*compose_overlay)(uint8_t *dst, int pitch, int width, int height);
++  /* Optional local title menu. action: 1 opens settings, 2 exits. freeze
++   * keeps the guest parked while host navigation/presentation continues. */
++  uint32_t (*filter_menu_input)(uint32_t input, int *action, int *freeze);
+ } SnesDesktopHostGame;
+ 
+ /* The whole program. Returns the process exit code. */
+diff --git a/runner/src/desktop/opengl.c b/runner/src/desktop/opengl.c
+index e9063a7..d02fe94 100644
+--- a/runner/src/desktop/opengl.c
++++ b/runner/src/desktop/opengl.c
+@@ -46,8 +46,11 @@ static SDL_Window *g_window;
+ static uint8 *g_screen_buffer;
+ static size_t g_screen_buffer_size;
+ static int g_draw_width, g_draw_height;
+-static unsigned int g_program, g_flash_program, g_VAO;
++static unsigned int g_program, g_flash_program, g_VAO, g_shader_VAO, g_present_vbo;
+ static GlTextureWithSize g_texture;
++#ifdef SCIV_FRONTEND
++static GLuint bezel;
++#endif
+ static GlslShader *g_glsl_shader;
+ static bool g_want_screenshot;
+ static double g_screenshot_flash_start_time = -1.0;
+@@ -157,9 +160,13 @@ static bool OpenGLRenderer_Init(SDL_Window *window) {
+   // create a vertex buffer object
+   unsigned int vbo;
+   glGenBuffers(1, &vbo);
++  g_present_vbo = vbo;
+ 
+   // vertex array object
+   glGenVertexArrays(1, &g_VAO);
++  /* Preset passes rewrite and disable attributes. Keep the plain presenter
++   * VAO intact for bezel artwork and screenshot flashes. */
++  glGenVertexArrays(1, &g_shader_VAO);
+   // 1. bind Vertex Array Object
+   glBindVertexArray(g_VAO);
+   // 2. copy our vertices array in a buffer for OpenGL to use
+@@ -268,6 +275,12 @@ static void OpenGLRenderer_Reconfigure(void) {
+ }
+ 
+ static void OpenGLRenderer_Destroy(void) {
++  if (g_shader_VAO) glDeleteVertexArrays(1, &g_shader_VAO);
++  g_shader_VAO = 0;
++#ifdef SCIV_FRONTEND
++  if (bezel) glDeleteTextures(1, &bezel);
++  bezel = 0;
++#endif
+ }
+ 
+ static void OpenGLRenderer_GetOutputSize(int *width, int *height) {
+@@ -402,6 +415,8 @@ static void OpenGLRenderer_EndDraw(void) {
+   glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+   glClear(GL_COLOR_BUFFER_BIT);
+ 
++
++
+   if (g_glsl_shader == NULL) {
+     glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
+     glUseProgram(g_program);
+@@ -411,10 +426,74 @@ static void OpenGLRenderer_EndDraw(void) {
+     glBindVertexArray(g_VAO);
+     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+   } else {
++    glBindVertexArray(g_shader_VAO);
+     GlslShader_Render(g_glsl_shader, &g_texture, viewport.x, viewport.y,
+                       viewport.width, viewport.height);
++    glBindVertexArray(g_VAO);
+   }
+ 
++#ifdef SCIV_FRONTEND
++  extern int sciv_bezel_enabled(void);
++
++  if (sciv_bezel_enabled() && !bezel) {
++    SDL_Surface *loaded = SDL_LoadBMP("assets/castlevania/bezel.bmp");
++    if (loaded) {
++#if defined(SNESRECOMP_SDL3)
++      SDL_Surface *s = SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_ARGB8888);
++#else
++      SDL_Surface *s = SDL_ConvertSurfaceFormat(loaded, SDL_PIXELFORMAT_ARGB8888, 0);
++#endif
++      if (s) {
++        glGenTextures(1, &bezel);
++        glBindTexture(GL_TEXTURE_2D, bezel);
++        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, s->w, s->h, 0,
++                    GL_BGRA, GL_UNSIGNED_BYTE, s->pixels);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++#if defined(SNESRECOMP_SDL3)
++        SDL_DestroySurface(s);
++#else
++        SDL_FreeSurface(s);
++#endif
++      }
++#if defined(SNESRECOMP_SDL3)
++      SDL_DestroySurface(loaded);
++#else
++      SDL_FreeSurface(loaded);
++#endif
++    }
++  }
++  /* Draw artwork after the game's preset passes, using the plain presenter. */
++  if (sciv_bezel_enabled() && bezel) {
++    glActiveTexture(GL_TEXTURE0);
++    glBindTexture(GL_TEXTURE_2D, bezel);
++    glUseProgram(g_program); glBindVertexArray(g_VAO);
++    glBindBuffer(GL_ARRAY_BUFFER, g_present_vbo);
++    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)0);
++    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)(3 * sizeof(float)));
++    glEnableVertexAttribArray(0);
++    glEnableVertexAttribArray(1);
++    glUniform1i(glGetUniformLocation(g_program, "texture1"), 0);
++    glEnable(GL_SCISSOR_TEST);
++    int left = viewport.x;
++    int right_x = viewport.x + viewport.width;
++    int right = drawable_width - right_x;
++    if (left > 0) {
++      glScissor(0, 0, left, drawable_height);
++      glViewport(0, 0, (left * 1536 + 150) / 300, drawable_height);
++      glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++    }
++    if (right > 0) {
++      int full = (right * 1536 + 150) / 300;
++      glScissor(right_x, 0, right, drawable_height);
++      glViewport(drawable_width - full, 0, full, drawable_height);
++      glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++    }
++    glDisable(GL_SCISSOR_TEST);
++  }
++  glBindTexture(GL_TEXTURE_2D, g_texture.gl_texture);
++#endif
++
+   if (g_want_screenshot) {
+     g_want_screenshot = false;
+     SaveScreenshotBmp(drawable_width, drawable_height);
+diff --git a/runner/src/snes/interp_bridge.c b/runner/src/snes/interp_bridge.c
+index c1e48eb..ad2de30 100644
+--- a/runner/src/snes/interp_bridge.c
++++ b/runner/src/snes/interp_bridge.c
+@@ -1643,7 +1643,7 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
+          * the CPU H/V comparator or a coprocessor asserts IRQ; otherwise a
+          * perfectly live hardware-poll loop can monopolize the bridge and
+          * starve the handler forever. */
+-        if (auto_quiescent && steps && !in.i && g_snes &&
++        if ((auto_quiescent || stop_on_rti) && steps && !in.i && g_snes &&
+             (g_snes->inIrq ||
+              (g_snes->cart && g_snes->cart->superfx &&
+               g_snes->cart->superfx->irq_pending) ||
+@@ -1659,7 +1659,7 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
+             bridge_apu_flush(cpu);
+             return 1;
+         }
+-        if (auto_quiescent && s_lle_master_deadline &&
++        if ((auto_quiescent || stop_on_rti) && s_lle_master_deadline &&
+             cpu->master_cycles >= s_lle_master_deadline) {
+             lle_resume_set(pc_before, INTERP_RESUME_SITE_DEADLINE, in.sp);
+             sync_interp_to_cpu(&in,cpu);
+@@ -2471,7 +2471,8 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
+         {
+             unsigned _internal = (unsigned)_cyc > s_interp_bus_cycles
+                                ? (unsigned)_cyc - s_interp_bus_cycles : 0;
+-            uint64_t _master = s_interp_bus_master + (uint64_t)_internal * 6u;
++            uint64_t _master = snes_cpu_timing_clocks(
++                s_interp_bus_master + (uint64_t)_internal * 6u);
+             g_interp_bridge_steps++;
+             cpu->cycles        += (uint64_t)_cyc;
+             cpu->master_cycles += _master;
+diff --git a/runner/src/snes/ppu.c b/runner/src/snes/ppu.c
+index 25dcfe0..8044985 100644
+--- a/runner/src/snes/ppu.c
++++ b/runner/src/snes/ppu.c
+@@ -193,6 +193,12 @@ void PpuSetWidescreenLineEnhancer(Ppu *ppu,
+   ppu->widescreenLineEnhancerContext = enhancer ? context : NULL;
+ }
+ 
++void PpuSetWidescreenTileResolver(Ppu *ppu, PpuWidescreenTileResolver *resolver,
++                                void *context) {
++  ppu->widescreenTileResolver = resolver;
++  ppu->widescreenTileResolverContext = resolver ? context : NULL;
++}
++
+ bool PpuBindMode7HdSurface(Ppu *ppu, uint32_t *pixels, size_t capacity,
+                             size_t pitch, unsigned width, unsigned height,
+                             unsigned scale) {
+@@ -766,6 +772,8 @@ int ppu_wlog_collect(uint32_t frame, PpuWlogEntry *out, int cap, int *lost) {
+ 
+ void ppu_runLine(Ppu* ppu, int line) {
+   PPU_T0_DECL
++  if (ppu->widescreenPresentationLine)
++    ppu->widescreenPresentationLine(ppu, line, true);
+   /* Writes from here to the next ppu_runLine land on line + 1; no register
+    * write happens inside a line's render. */
+   s_wlog_line = line + 1;
+@@ -851,6 +859,8 @@ void ppu_runLine(Ppu* ppu, int line) {
+     if (ppu->mode7Hd.pixels)
+       PpuDrawMode7HdLine(ppu, (unsigned)line);
+   }
++  if (ppu->widescreenPresentationLine)
++    ppu->widescreenPresentationLine(ppu, line, false);
+ }
+ 
+ typedef struct PpuWindows {
+@@ -1110,7 +1120,7 @@ static void PpuDrawBackground_4bpp(Ppu *ppu, PpuPixelPrioBufs *dstbuf,
+   int tileadr1 = tileadr + 7 - (y & 0x7), tileadr0 = tileadr + (y & 0x7);
+   const uint16 *addr;
+   bool ws_shadow = WsShadowLayerActive(layer);
+-#define WS_TILE(t, sx) (ws_shadow ? WsShadowTile(layer, (sx), y, (uint16_t)ppu->hScroll[layer], (uint16_t)(tp - PpuRenderVram(ppu)), (uint16_t)(t)) : (uint32)(t))
++#define WS_TILE(t, sx) (ppu->widescreenTileResolver && (ppu->widescreenResolveAllTiles || (sx) <= -8 || (sx) >= 256) ? ppu->widescreenTileResolver(ppu, layer, (sx), y, ppu->widescreenTileResolverContext) : (ws_shadow ? WsShadowTile(layer, (sx), y, (uint16_t)ppu->hScroll[layer], (uint16_t)(tp - PpuRenderVram(ppu)), (uint16_t)(t)) : (uint32)(t)))
+   for (size_t windex = 0; windex < win.nr; windex++) {
+     if (win.bits & (1 << windex))
+       continue;  // layer is disabled for this window part
+@@ -1131,7 +1141,7 @@ static void PpuDrawBackground_4bpp(Ppu *ppu, PpuPixelPrioBufs *dstbuf,
+       NEXT_TP();
+       int ta = (tile & 0x8000) ? tileadr1 : tileadr0;
+       PpuZbufType z = (tile & 0x2000) ? zhi : zlo;
+-      uint32 bits = READ_BITS(ta, tile & 0x3ff);
++      uint32 bits = (tile & 0x10000) ? 0 : READ_BITS(ta, tile & 0x3ff);
+       if (bits) {
+         z += ((tile & 0x1c00) >> kPaletteShift);
+         if (tile & 0x4000) {
+@@ -1151,7 +1161,7 @@ static void PpuDrawBackground_4bpp(Ppu *ppu, PpuPixelPrioBufs *dstbuf,
+       NEXT_TP();
+       int ta = (tile & 0x8000) ? tileadr1 : tileadr0;
+       PpuZbufType z = (tile & 0x2000) ? zhi : zlo;
+-      uint32 bits = READ_BITS(ta, tile & 0x3ff);
++      uint32 bits = (tile & 0x10000) ? 0 : READ_BITS(ta, tile & 0x3ff);
+       if (bits) {
+         z += ((tile & 0x1c00) >> kPaletteShift);
+         if (tile & 0x4000) {
+@@ -1169,7 +1179,7 @@ static void PpuDrawBackground_4bpp(Ppu *ppu, PpuPixelPrioBufs *dstbuf,
+       uint32 tile = WS_TILE(*tp, ws_sx);
+       int ta = (tile & 0x8000) ? tileadr1 : tileadr0;
+       PpuZbufType z = (tile & 0x2000) ? zhi : zlo;
+-      uint32 bits = READ_BITS(ta, tile & 0x3ff);
++      uint32 bits = (tile & 0x10000) ? 0 : READ_BITS(ta, tile & 0x3ff);
+       if (bits) {
+         z += ((tile & 0x1c00) >> kPaletteShift);
+         if (tile & 0x4000) {
+@@ -1292,8 +1302,12 @@ static void PpuDrawBackgroundBig(Ppu *ppu, PpuPixelPrioBufs *dstbuf, uint y,
+       if (((sx >> 9) & 1) && PPU_bgTilemapWider(ppu, layer))
+         sc += 0x400;
+       sc += (sx >> 4) & 31;
+-      uint16 tile = PpuRenderVram(ppu)[sc & 0x7fff];
++      uint32 tile = PpuRenderVram(ppu)[sc & 0x7fff];
+       unsigned px = (unsigned)sx & 15, py = (unsigned)sy & 15;
++      if (bpp == 4 && ppu->widescreenTileResolver && (ppu->widescreenResolveAllTiles || screen_x < 0 || screen_x >= 256))
++        tile = ppu->widescreenTileResolver(ppu, (int)layer, screen_x,
++                    (uint32_t)sy, ppu->widescreenTileResolverContext);
++      if (tile & 0x10000) continue;
+       /* Margins: world-keyed shadow tile + matching world pixel phase.
+        * Using live hScroll/vScroll for px/py while the tile key used the
+        * NMI-latched world origin produced a persistent ~phase seam. */
+@@ -1690,7 +1704,7 @@ static void PpuDrawBackground_4bpp_mosaic(Ppu *ppu,
+   int tileadr1 = tileadr + 7 - (y & 0x7), tileadr0 = tileadr + (y & 0x7);
+   const uint16 *addr;
+   bool ws_shadow = WsShadowLayerActive(layer);
+-#define WS_TILE(t, sx) (ws_shadow ? WsShadowTile(layer, (sx), y, (uint16_t)ppu->hScroll[layer], (uint16_t)(tp - PpuRenderVram(ppu)), (uint16_t)(t)) : (uint32)(t))
++#define WS_TILE(t, sx) (ppu->widescreenTileResolver && (ppu->widescreenResolveAllTiles || (sx) <= -8 || (sx) >= 256) ? ppu->widescreenTileResolver(ppu, layer, (sx), y, ppu->widescreenTileResolverContext) : (ws_shadow ? WsShadowTile(layer, (sx), y, (uint16_t)ppu->hScroll[layer], (uint16_t)(tp - PpuRenderVram(ppu)), (uint16_t)(t)) : (uint32)(t)))
+   for (size_t windex = 0; windex < win.nr; windex++) {
+     if (win.bits & (1 << windex))
+       continue;  // layer is disabled for this window part
+@@ -1709,7 +1723,7 @@ static void PpuDrawBackground_4bpp_mosaic(Ppu *ppu,
+       uint32 tile = WS_TILE(*tp, ws_sx);
+       int ta = (tile & 0x8000) ? tileadr1 : tileadr0;
+       PpuZbufType z = (tile & 0x2000) ? zhi : zlo;
+-      uint32 bits = READ_BITS(ta, tile & 0x3ff);
++      uint32 bits = (tile & 0x10000) ? 0 : READ_BITS(ta, tile & 0x3ff);
+       if (tile & 0x4000) bits >>= x, GET_PIXEL(); else bits <<= x, GET_PIXEL_HFLIP();
+       if (pixel) {
+         pixel += ((tile & 0x1c00) >> kPaletteShift);
+@@ -2002,7 +2016,7 @@ static void PpuDrawBackground_2bpp_mosaic(Ppu *ppu, PpuPixelPrioBufs *dstbuf, in
+       uint32 tile = *tp;
+       int ta = (tile & 0x8000) ? tileadr1 : tileadr0;
+       PpuZbufType z = (tile & 0x2000) ? zhi : zlo;
+-      uint32 bits = READ_BITS(ta, tile & 0x3ff);
++      uint32 bits = (tile & 0x10000) ? 0 : READ_BITS(ta, tile & 0x3ff);
+       if (tile & 0x4000) bits >>= x, GET_PIXEL(); else bits <<= x, GET_PIXEL_HFLIP();
+       if (pixel) {
+         pixel += ((tile & 0x1c00) >> kPaletteShift);
+@@ -2053,9 +2067,15 @@ static void PpuDrawBackground_mode7(Ppu *ppu, PpuPixelPrioBufs *dstbuf, uint y,
+     if (win.bits & (1 << windex))
+       continue;  // layer is disabled for this window part
+     int x = win.edges[windex], x2 = win.edges[windex + 1], tile;
++    if (ppu->widescreenMode7Native) {
++      x = IntMax(x, -ppu->widescreenMode7Shift);
++      x2 = IntMin(x2, 256 - ppu->widescreenMode7Shift);
++      if (x >= x2) continue;
++    }
+     PpuZbufType *dstz = dstbuf->data + x + kPpuExtraLeftRight;
+     PpuZbufType *dstz_end = dstbuf->data + x2 + kPpuExtraLeftRight;
+-    uint32 rx = PPU_m7xFlip(ppu) ? 255 - x : x;
++    int source_x = x + ppu->widescreenMode7Shift;
++    uint32 rx = PPU_m7xFlip(ppu) ? 255 - source_x : source_x;
+     uint32 xpos = m7startX + ppu->m7matrix[0] * rx;
+     uint32 ypos = m7startY + ppu->m7matrix[2] * rx;
+     uint32 dx = PPU_m7xFlip(ppu) ? -ppu->m7matrix[0] : ppu->m7matrix[0];
+@@ -2570,7 +2590,8 @@ static void PpuDrawMode7HdLine(Ppu *ppu, unsigned line) {
+       !PPU_directColor(ppu) && !PPU_interlace(ppu) &&
+       !PPU_pseudoHires(ppu) &&
+       !(PPU_mosaicEnabled(ppu, 0) && PPU_mosaicSize(ppu) > 1) &&
+-      !ppu->widescreenLineEnhancer && !(ppu->wsHudSplitHeight & 0x80);
++      !ppu->widescreenLineEnhancer && !ppu->widescreenTileResolver &&
++      !(ppu->wsHudSplitHeight & 0x80);
+   /* An independently promoted surface is composed by the host. Keep those
+    * pixels identical until that host also opts into HD overlay composition. */
+   for (unsigned source = 0; hd && source < kPpuOverlaySource_Count; ++source)
+@@ -2689,7 +2710,7 @@ static int PpuDecodeOamX(Ppu *ppu, uint8_t index) {
+     if (!(ppu->wsOamRightHint[slot >> 3] & (1u << (slot & 7))))
+       x -= 512;
+   }
+-  return x;
++  return x + ppu->widescreenOamXOffset;
+ }
+ 
+ static uint32_t PpuOamMotionSignature(Ppu *ppu, uint8_t index) {
+diff --git a/runner/src/snes/ppu.h b/runner/src/snes/ppu.h
+index 9263633..4ba7ab3 100644
+--- a/runner/src/snes/ppu.h
++++ b/runner/src/snes/ppu.h
+@@ -20,6 +20,11 @@ typedef struct PpuMode7HdSurface {
+ } PpuMode7HdSurface;
+ typedef void PpuWidescreenLineEnhancer(Ppu *ppu, uint y, bool sub,
+                                        void *context);
++/* Resolve presentation-only margin entries without changing guest VRAM.
++ * Native columns continue to use the original tilemap. */
++/* Return 0x10000 for a transparent margin tile when no verified source exists. */
++typedef uint32_t PpuWidescreenTileResolver(const Ppu *ppu, int layer,
++    int screen_x, uint32_t scrolled_y, void *context);
+ 
+ typedef struct BgLayer {
+   uint16_t xhScroll;
+@@ -355,6 +360,14 @@ struct Ppu {
+   // Host-only widescreen state; excluded from savestates and cleared by reset.
+   PpuWidescreenLineEnhancer *widescreenLineEnhancer;
+   void *widescreenLineEnhancerContext;
++  PpuWidescreenTileResolver *widescreenTileResolver;
++  void *widescreenTileResolverContext;
++  /* Presentation-only remap around a scanline; restored before HDMA/observers. */
++  void (*widescreenPresentationLine)(Ppu *, int line, bool begin);
++  bool widescreenResolveAllTiles;
++  bool widescreenMode7Native;
++  int16_t widescreenMode7Shift;
++  int16_t widescreenOamXOffset;
+ 
+   /* Host-only: bumped on every VRAM store (the $2118/$2119 ports, the 16-bit
+    * fast path, and a save-state load). A frame-model host that snapshots the
+@@ -694,6 +707,8 @@ void ppu_rb_residue_set(Ppu *ppu, const PpuRollbackResidue *in);
+ void PpuSetWidescreenLineEnhancer(Ppu *ppu,
+                                   PpuWidescreenLineEnhancer *enhancer,
+                                   void *context);
++void PpuSetWidescreenTileResolver(Ppu *ppu, PpuWidescreenTileResolver *resolver,
++                                void *context);
+ 
+ // Renderer-neutral host-overlay extraction (opt-in; see
+ // docs/HOST_OVERLAY_EXTRACTION.md). Default behavior is unchanged: with no
+diff --git a/runner/src/snes_rewind.c b/runner/src/snes_rewind.c
+index 3507658..8704422 100644
+--- a/runner/src/snes_rewind.c
++++ b/runner/src/snes_rewind.c
+@@ -22,6 +22,7 @@
+ 
+ #include "snes_overlay_draw.h"
+ #include "common_rtl.h"
++#include "common_cpu_infra.h"
+ #include "netplay/snes_netplay.h"
+ 
+ /* Thumbnail geometry matches the save-state menu so the two overlays look
+@@ -31,7 +32,8 @@
+ 
+ #define RW_DEPTH_DEFAULT   60
+ #define RW_DEPTH_MIN        4
+-#define RW_DEPTH_MAX      240
++#define RW_DEPTH_MAX      300
++#define RW_MEMORY_LIMIT (128u * 1024u * 1024u)
+ #define RW_INTERVAL_DEFAULT 6
+ #define RW_INTERVAL_MIN     1
+ #define RW_INTERVAL_MAX    60
+@@ -43,6 +45,8 @@ typedef struct {
+     uint32_t thumb[RW_THUMB_W * RW_THUMB_H];
+     int      have_thumb;
+     int      valid;
++    uint16_t *frame;                  /* RGB555: exact SNES color precision */
++    int frame_w, frame_h;
+ } RwSlot;
+ 
+ static int      s_configured;
+@@ -61,6 +65,12 @@ static int      s_sel;                 /* 0 = newest, grows going back */
+ 
+ static uint32_t s_live_thumb[RW_THUMB_W * RW_THUMB_H];
+ static int      s_have_live_thumb;
++static int s_hold_mode;
++/* Match the desktop compositor's capacity, including widened native fields. */
++static uint16_t s_live_frame[1024 * 240];
++static int s_live_w, s_live_h;
++
++void snes_rewind_set_hold_mode(int enabled) { s_hold_mode = enabled != 0; }
+ 
+ /* ---- env ---------------------------------------------------------------- */
+ 
+@@ -118,7 +128,10 @@ void snes_rewind_configure(void) {
+ void snes_rewind_shutdown(void) {
+     int i;
+     if (s_ring) {
+-        for (i = 0; i < s_depth; i++) free(s_ring[i].blob);
++        for (i = 0; i < s_depth; i++) {
++            free(s_ring[i].blob);
++            free(s_ring[i].frame);
++        }
+         free(s_ring);
+         s_ring = NULL;
+     }
+@@ -126,12 +139,17 @@ void snes_rewind_shutdown(void) {
+     s_frame_tick = 0;
+     s_blob_size = 0;
+     s_have_live_thumb = 0;
++    s_live_w = s_live_h = 0;
+     s_enabled = 1;
+     s_open = 0;
+     s_configured = 0;
+ }
+ 
+-int snes_rewind_enabled(void) { return s_enabled && s_ring != NULL; }
++int snes_rewind_enabled(void) {
++    if (g_rtl_game_info && g_rtl_game_info->snapshot_allowed &&
++        !g_rtl_game_info->snapshot_allowed()) return 0;
++    return s_enabled && s_ring != NULL;
++}
+ 
+ /* ---- capture ------------------------------------------------------------ */
+ 
+@@ -149,6 +167,18 @@ static void capture(void) {
+         free(probe);
+         if (!n) return;                /* machine not ready yet; try later */
+         s_blob_size = n;
++        if (s_hold_mode) {
++            size_t slot_bytes = sizeof(RwSlot) + n + n / 8 + 4096 + sizeof(s_live_frame);
++            int bounded_depth = (int)(RW_MEMORY_LIMIT / slot_bytes);
++            if (s_depth > bounded_depth) {
++              RwSlot *smaller = realloc(s_ring, bounded_depth * sizeof(*s_ring));
++              if (!smaller) { s_enabled = 0; return; }
++              s_ring = smaller;
++              s_depth = bounded_depth;
++            }
++            fprintf(stderr, "[snes_rewind] hold history: %d states, %.1fs, <=128 MiB\n",
++                    s_depth, (double)s_depth * s_interval / 60.0);
++        }
+         fprintf(stderr, "[snes_rewind] snapshot is %zu bytes; ring is %.1f MB\n",
+                 s_blob_size,
+                 (double)s_blob_size * (double)s_depth / (1024.0 * 1024.0));
+@@ -173,6 +203,14 @@ static void capture(void) {
+         return;
+     }
+     slot->len = n;
++    slot->frame_w = slot->frame_h = 0;
++    if (s_hold_mode && s_live_w && s_live_h) {
++        if (!slot->frame) slot->frame = malloc(sizeof(s_live_frame));
++        if (!slot->frame) { slot->valid = 0; return; }
++        memcpy(slot->frame, s_live_frame, (size_t)s_live_w * s_live_h * sizeof(uint16_t));
++        slot->frame_w = s_live_w;
++        slot->frame_h = s_live_h;
++    }
+     slot->valid = 1;
+     slot->have_thumb = s_have_live_thumb;
+     if (s_have_live_thumb)
+@@ -206,6 +244,16 @@ void snes_rewind_note_framebuffer(const uint32_t *fb, int width, int height) {
+             out[x] = row[x * width / RW_THUMB_W] | 0xFF000000u;
+     }
+     s_have_live_thumb = 1;
++    s_live_w = s_live_h = 0;
++    if (s_hold_mode && width <= 1024 && height <= 240) {
++        s_live_w = width;
++        s_live_h = height;
++        for (int i = 0; i < width * height; i++) {
++            uint32_t p = fb[i];
++            s_live_frame[i] = (uint16_t)(((p >> 19) & 31) << 10 |
++                                      ((p >> 11) & 31) << 5 | ((p >> 3) & 31));
++        }
++    }
+ }
+ 
+ /* ---- selection ---------------------------------------------------------- */
+@@ -219,6 +267,34 @@ static RwSlot *slot_at(int sel) {
+     return &s_ring[idx];
+ }
+ 
++int snes_rewind_pop(uint32_t *dst, int width, int height) {
++    if (!s_open || !s_hold_mode || !dst || width <= 0 || width > 1024 ||
++        height <= 0 || height > 240) return 0;
++    RwSlot *slot = slot_at(0);
++    if (!slot || !slot->valid || !slot->frame ||
++        slot->frame_w <= 0 || slot->frame_h <= 0) return 0;
++    if (!RtlLoadSnapshotFromMemory(slot->blob, slot->len)) {
++        fprintf(stderr, "[snes_rewind] hold restore refused\n");
++        return 0;
++    }
++    /* A view change must not block time travel. Center/crop the stored
++     * picture in the current view; new columns remain black until resume. */
++    for (int i = 0; i < width * height; i++) {
++        int x = i % width + (slot->frame_w - width) / 2;
++        int y = i / width;
++        uint16_t p = x >= 0 && x < slot->frame_w && y < slot->frame_h
++            ? slot->frame[y * slot->frame_w + x] : 0;
++        unsigned r = (p >> 10) & 31, g = (p >> 5) & 31, b = p & 31;
++        dst[i] = 0xff000000u | ((r << 3 | r >> 2) << 16) |
++                 ((g << 3 | g >> 2) << 8) | (b << 3 | b >> 2);
++    }
++    slot->valid = 0;
++    s_head = (s_head + s_depth - 1) % s_depth;
++    --s_count;
++    s_sel = s_frame_tick = 0;
++    return 1;
++}
++
+ int snes_rewind_open(void) {
+     if (!snes_rewind_enabled()) return 0;
+ #if defined(SNESRECOMP_NET)
+diff --git a/runner/src/snes_rewind.h b/runner/src/snes_rewind.h
+index 632b058..316ee22 100644
+--- a/runner/src/snes_rewind.h
++++ b/runner/src/snes_rewind.h
+@@ -67,6 +67,10 @@ void snes_rewind_note_framebuffer(const uint32_t *fb, int width, int height);
+  * or when fewer than two snapshots exist — there is nothing to go back to. */
+ int snes_rewind_open(void);
+ int snes_rewind_is_open(void);
++/* Restore and discard the newest recorded state, copying its matching full
++ * raster into dst. Used by hold-to-rewind; never advances guest execution. */
++int snes_rewind_pop(uint32_t *dst, int width, int height);
++void snes_rewind_set_hold_mode(int enabled);
+ 
+ /* Move the selection. -1 is further back in time, +1 is nearer the present.
+  * Clamps at both ends rather than wrapping: wrapping from the oldest snapshot
+diff --git a/runner/src/snes_savestate_menu.c b/runner/src/snes_savestate_menu.c
+index 4c9d211..7c80562 100644
+--- a/runner/src/snes_savestate_menu.c
++++ b/runner/src/snes_savestate_menu.c
+@@ -562,3 +562,27 @@ int snes_savestate_menu_overlay_image(const uint32_t **pixels, int *w, int *h)
+     if (h) *h = SSM_H;
+     return 1;
+ }
++
++int snes_savestate_menu_slot_info(int slot, char *status, unsigned capacity) {
++    if (slot < 0 || slot >= SSM_SLOTS || !status || !capacity) return 0;
++    format_slot_status(slot, status, capacity);
++    return slot_exists(slot);
++}
++int snes_savestate_menu_submit_slot(int slot, int save) {
++    if (slot < 0 || slot >= SSM_SLOTS) return 0;
++    char path[256];
++    RtlEnsureSaveDir();
++    slot_path(slot, path, sizeof(path));
++    if (save) {
++        if (!RtlSaveSnapshot(path)) return 0;
++        if (s_have_live_thumb) write_thumb(slot, s_live_thumb);
++        s_thumbs_scanned = 0;
++        snes_osd_push_slot_saved(slot);
++        fprintf(stderr, "[save-state menu] saved slot %02d\n", slot+1);
++        return 1;
++    }
++    if (!slot_exists(slot) || !RtlLoadSnapshot(path)) return 0;
++    snes_osd_push_slot_loaded(slot);
++    fprintf(stderr, "[save-state menu] loaded slot %02d\n", slot+1);
++    return 1;
++}
+diff --git a/runner/src/snes_savestate_menu.h b/runner/src/snes_savestate_menu.h
+index 940af7d..daa755c 100644
+--- a/runner/src/snes_savestate_menu.h
++++ b/runner/src/snes_savestate_menu.h
+@@ -47,6 +47,10 @@ extern "C" {
+ #define SNES_SSM_W 512
+ #define SNES_SSM_H 448
+ 
++/* Metadata and actions shared by title-owned menu frontends. */
++int snes_savestate_menu_slot_info(int slot, char *status, unsigned capacity);
++int snes_savestate_menu_submit_slot(int slot, int save);
++
+ int  snes_savestate_menu_is_open(void);
+ 
+ /* Mask out any button that was still held when the menu closed, until it is
+diff --git a/tools/sdk_generate.py b/tools/sdk_generate.py
+index e23031d..68618e2 100644
+--- a/tools/sdk_generate.py
++++ b/tools/sdk_generate.py
+@@ -127,7 +127,7 @@ def generate(
+         if not reporter.json_progress:
+             return run_tool(tool, arguments)
+         capture = io.StringIO()
+-        with contextlib.redirect_stdout(capture):
++        with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
+             code = run_tool(tool, arguments)
+         for line in capture.getvalue().splitlines():
+             if line.strip():

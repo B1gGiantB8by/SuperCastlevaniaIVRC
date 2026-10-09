@@ -1,0 +1,14 @@
+diff --git a/runner/src/desktop/host_main.c b/runner/src/desktop/host_main.c
+index 21a8bf3..e5f5451 100644
+--- a/runner/src/desktop/host_main.c
++++ b/runner/src/desktop/host_main.c
+@@ -3931,6 +3931,9 @@ error_reading:;
+     g_open_launcher_hotkey = 0;
+     if ((g_rewind_hotkey || PadGesturePressed(&g_rewind_gesture)) && !snes_rewind_is_open() &&
+         !snes_savestate_menu_is_open()) {
++      /* Consume before the modal loop: the continue below bypasses the
++       * normal reset, otherwise committing/cancelling immediately reopens. */
++      g_rewind_hotkey = 0;
+       /* Refused during netplay by snes_rewind_open() itself: one machine
+        * cannot move its own clock backwards while a peer is watching. */
+       if (snes_rewind_open()) {

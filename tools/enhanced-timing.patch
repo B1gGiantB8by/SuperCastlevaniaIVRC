@@ -1,0 +1,107 @@
+diff --git a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+index e5e264f..5546aa9 100644
+--- a/recompiler/v2/emit_function.py
++++ b/recompiler/v2/emit_function.py
+@@ -2179,7 +2179,12 @@ def emit_function(rom: bytes, bank: int, start: int,
+     src.append("  RecompStackPop();")
+     src.append("  return RECOMP_RETURN_NORMAL;")
+     src.append("}")
+-    return "\n".join(src) + "\n"
++    # Apply the same optional CPU clock budget to static blocks, branch/DP
++    # penalties and block moves. Hardware DMA/beam clocks remain unscaled.
++    import re
++    source = "\n".join(src) + "\n"
++    return re.sub(r"cpu->master_cycles \+= ([^;]+);",
++                  r"cpu->master_cycles += snes_cpu_timing_clocks(\1);", source)
+ 
+ 
+ def _reg_for_flag(flag) -> str:
+diff --git a/runner/src/common_cpu_infra.c b/runner/src/common_cpu_infra.c
+index 2d1f2e0..4de2cd9 100644
+--- a/runner/src/common_cpu_infra.c
++++ b/runner/src/common_cpu_infra.c
+@@ -35,6 +35,7 @@
+ #endif
+ 
+ Snes *g_snes;
++unsigned snes_cpu_timing_divisor = 1;
+ Cpu *g_snes_cpu;
+ 
+ bool g_fail;
+diff --git a/runner/src/cpu_state.c b/runner/src/cpu_state.c
+index 57fe6bc..3b67e0c 100644
+--- a/runner/src/cpu_state.c
++++ b/runner/src/cpu_state.c
+@@ -754,7 +754,7 @@ void cpu_write16(CpuState *cpu, uint8 bank, uint16 addr, uint16 v) {
+  * a region boundary, e.g. $00:1FFF->$00:2000). */
+ uint8_t cpu_read8_paced(CpuState *cpu, uint8_t bank, uint16_t addr) {
+     uint32_t _sp = cpu_region_speed(((uint32_t)bank << 16) | addr);
+-    cpu->master_cycles += _sp;
++    cpu->master_cycles += snes_cpu_timing_clocks(_sp);
+     {
+         static int _pl = -1;
+         if (_pl < 0) _pl = getenv("SNESRECOMP_PACELOG") ? 1 : 0;
+@@ -770,7 +770,7 @@ uint8_t cpu_read8_paced(CpuState *cpu, uint8_t bank, uint16_t addr) {
+ uint16_t cpu_read16_paced(CpuState *cpu, uint8_t bank, uint16_t addr) {
+     uint32_t _sp = cpu_region_speed(((uint32_t)bank << 16) | addr) +
+         cpu_region_speed(((uint32_t)bank << 16) | (uint16_t)(addr + 1));
+-    cpu->master_cycles += _sp;
++    cpu->master_cycles += snes_cpu_timing_clocks(_sp);
+     {
+         static int _pl = -1;
+         if (_pl < 0) _pl = getenv("SNESRECOMP_PACELOG") ? 1 : 0;
+@@ -785,7 +785,7 @@ uint16_t cpu_read16_paced(CpuState *cpu, uint8_t bank, uint16_t addr) {
+ 
+ void cpu_write8_paced(CpuState *cpu, uint8_t bank, uint16_t addr, uint8_t v) {
+     uint32_t _sp = cpu_region_speed(((uint32_t)bank << 16) | addr);
+-    cpu->master_cycles += _sp;
++    cpu->master_cycles += snes_cpu_timing_clocks(_sp);
+     {
+         static int _pl = -1;
+         if (_pl < 0) _pl = getenv("SNESRECOMP_PACELOG") ? 1 : 0;
+@@ -801,7 +801,7 @@ void cpu_write8_paced(CpuState *cpu, uint8_t bank, uint16_t addr, uint8_t v) {
+ void cpu_write16_paced(CpuState *cpu, uint8_t bank, uint16_t addr, uint16_t v) {
+     uint32_t _sp = cpu_region_speed(((uint32_t)bank << 16) | addr) +
+         cpu_region_speed(((uint32_t)bank << 16) | (uint16_t)(addr + 1));
+-    cpu->master_cycles += _sp;
++    cpu->master_cycles += snes_cpu_timing_clocks(_sp);
+     {
+         static int _pl = -1;
+         if (_pl < 0) _pl = getenv("SNESRECOMP_PACELOG") ? 1 : 0;
+diff --git a/runner/src/cpu_state.h b/runner/src/cpu_state.h
+index f9b1e26..c2adf9a 100644
+--- a/runner/src/cpu_state.h
++++ b/runner/src/cpu_state.h
+@@ -1,5 +1,18 @@
+ #pragma once
+ 
++#include <stdint.h>
++/* Host preference; deliberately outside serialized architectural state. */
++#ifdef __cplusplus
++extern "C" {
++#endif
++extern unsigned snes_cpu_timing_divisor;
++static inline uint64_t snes_cpu_timing_clocks(uint64_t clocks) {
++    return snes_cpu_timing_divisor == 1 ? clocks : (clocks + 1) / 2;
++}
++#ifdef __cplusplus
++}
++#endif
++
+ /*
+  * snesrecomp v2 runtime CpuState.
+  *
+diff --git a/runner/src/snes/interp_bridge.c b/runner/src/snes/interp_bridge.c
+index c1e48eb..ad2de30 100644
+--- a/runner/src/snes/interp_bridge.c
++++ b/runner/src/snes/interp_bridge.c
+@@ -2471,7 +2471,8 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
+         {
+             unsigned _internal = (unsigned)_cyc > s_interp_bus_cycles
+                                ? (unsigned)_cyc - s_interp_bus_cycles : 0;
+-            uint64_t _master = s_interp_bus_master + (uint64_t)_internal * 6u;
++            uint64_t _master = snes_cpu_timing_clocks(
++                s_interp_bus_master + (uint64_t)_internal * 6u);
+             g_interp_bridge_steps++;
+             cpu->cycles        += (uint64_t)_cyc;
+             cpu->master_cycles += _master;

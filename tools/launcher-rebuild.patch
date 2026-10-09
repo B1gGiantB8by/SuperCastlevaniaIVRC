@@ -1,0 +1,56 @@
+diff --git a/host/snesrecomp_codegen_host.c b/host/snesrecomp_codegen_host.c
+index 13040e4..7199ae8 100644
+--- a/host/snesrecomp_codegen_host.c
++++ b/host/snesrecomp_codegen_host.c
+@@ -1721,7 +1721,11 @@ void snesrecomp_codegen_host_autowire(RecompLauncherCGameInfo* gi,
+     /* The CMake target and the relaunch binary are the same name by
+      * construction: the scaffolder names the executable after the target.
+      * Every other field stays NULL so apply()'s defaults own the layout. */
++#ifdef SNESRECOMP_CMAKE_TARGET_NAME
++    cfg.cmake_target = SNESRECOMP_CMAKE_TARGET_NAME;
++#else
+     cfg.cmake_target = exe_name;
++#endif
+     cfg.exe_basename = exe_name;
+     /* Game ports seed generation from bank .cfg roots; the scaffolder emits
+      * them, so this is the scaffold default rather than a per-title choice. */
+diff --git a/recompiler/v2/atomic_output.py b/recompiler/v2/atomic_output.py
+index fcb3ddb..e618b38 100644
+--- a/recompiler/v2/atomic_output.py
++++ b/recompiler/v2/atomic_output.py
+@@ -6,6 +6,7 @@ import atexit
+ import os
+ import pathlib
+ import shutil
++import subprocess
+ import tempfile
+ 
+ 
+@@ -30,6 +31,14 @@ class AtomicOutputDir:
+             prefix=f".{self.target.name}.snesrecomp-staging-",
+             dir=str(self.parent))
+         self.staging = pathlib.Path(raw)
++        if os.name == "nt":
++            # mkdtemp restricts Windows ACLs to its creator. Published sources
++            # must retain the project's permissions so a launcher running as
++            # another authorized account can regenerate the tree later.
++            subprocess.run(
++                ["icacls", str(self.staging), "/inheritance:e"],
++                check=True, capture_output=True,
++                creationflags=subprocess.CREATE_NO_WINDOW)
+         if self.target.exists():
+             self._link_existing_tree(self.target, self.staging)
+         atexit.register(self.cleanup)
+diff --git a/tools/sdk_generate.py b/tools/sdk_generate.py
+index e23031d..68618e2 100644
+--- a/tools/sdk_generate.py
++++ b/tools/sdk_generate.py
+@@ -127,7 +127,7 @@ def generate(
+         if not reporter.json_progress:
+             return run_tool(tool, arguments)
+         capture = io.StringIO()
+-        with contextlib.redirect_stdout(capture):
++        with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
+             code = run_tool(tool, arguments)
+         for line in capture.getvalue().splitlines():
+             if line.strip():

@@ -1,0 +1,67 @@
+--- a/runner/src/desktop/host_main.h
++++ b/runner/src/desktop/host_main.h
+@@ -202,6 +202,9 @@
+    * Request 1..3x output to keep overlay text readable on a native field. */
+   int (*overlay_scale)(void);
+   void (*compose_overlay)(uint8_t *dst, int pitch, int width, int height);
++  /* Optional local title menu. action: 1 opens settings, 2 exits. freeze
++   * keeps the guest parked while host navigation/presentation continues. */
++  uint32_t (*filter_menu_input)(uint32_t input, int *action, int *freeze);
+ } SnesDesktopHostGame;
+ 
+ /* The whole program. Returns the process exit code. */
+--- a/runner/src/desktop/host_main.c
++++ b/runner/src/desktop/host_main.c
+@@ -4189,6 +4189,42 @@
+       break;
+     }
+     inputs |= debug_server_get_controller_inputs();
++    int title_freeze = 0;
++    if (game->filter_menu_input) {
++      Config title_before = g_config;
++      int action = 0;
++      inputs = game->filter_menu_input(inputs, &action, &title_freeze);
++#ifdef RECOMP_LAUNCHER
++      if (memcmp(&title_before, &g_config, sizeof(Config)) != 0) {
++        WriteConfigFile(g_active_config_file);
++        ApplyVolume();
++        ApplyLiveSettings(&title_before);
++        /* Backend/audio-device changes use the same saved-machine restart
++         * as the in-game launcher; ordinary edits apply on this frame. */
++        if (g_config.output_method != title_before.output_method ||
++            strcmp(g_config.renderer, title_before.renderer) != 0 ||
++            g_config.enable_audio != title_before.enable_audio) {
++          if (snesrecomp_abspath("saves/resume.sav", g_relaunch.state,
++                                sizeof(g_relaunch.state)) &&
++              RtlSaveSnapshot(g_relaunch.state)) {
++            snprintf(g_relaunch.rom, sizeof(g_relaunch.rom), "%s", g_rom_path);
++            g_relaunch.with_state = g_relaunch.pending = true;
++            running = false;
++            exit_reason = "title menu: restarting to apply a setting";
++            break;
++          }
++          /* Keep the live device consistent if no resume state can be made. */
++          g_config.output_method = title_before.output_method;
++          snprintf(g_config.renderer, sizeof(g_config.renderer), "%s", title_before.renderer);
++          g_config.enable_audio = title_before.enable_audio;
++          WriteConfigFile(g_active_config_file);
++          host_report_breadcrumb("title menu: unable to save device-change resume state");
++        }
++      }
++#endif
++      if (action == 1) { g_open_launcher_hotkey = 1; continue; }
++      if (action == 2) { running = false; exit_reason = "title menu quit"; break; }
++    }
+     double profile_start = ProfileStart();
+     double guest_start = MonotonicSeconds();
+     if (game->before_run_frame) game->before_run_frame();
+@@ -4202,7 +4238,8 @@
+     bool runahead_captured = false;
+     {
+       const uint32 word = inputs | GetActiveControllers() | debug_server_get_controller_active_mask();
+-      if (g_turbo || !snes_runahead_run_frame(word))
++      if (title_freeze) { /* Preserve the native title raster. */ }
++      else if (g_turbo || !snes_runahead_run_frame(word))
+         RtlRunFrame(word);
+       else
+         runahead_captured = true;   /* it rasterised the speculated frame */

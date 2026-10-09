@@ -1,0 +1,497 @@
+diff --git a/src/common/backends/imgui/launcher_imgui.cpp b/src/common/backends/imgui/launcher_imgui.cpp
+index 6a25fc1..86016f5 100644
+--- a/src/common/backends/imgui/launcher_imgui.cpp
++++ b/src/common/backends/imgui/launcher_imgui.cpp
+@@ -354,6 +354,7 @@ bool download_icon_button(const char* id, float side, bool enabled,
+ }
+ // g_th moved to external linkage above the anonymous namespace (see note).
+ 
++LauncherTexture g_sciv_background, g_sciv_logo;
+ LauncherTexture g_boxart, g_pad, g_pad_analog, g_pad_digital, g_brand, g_memcard;
+ // Optional platform wordmark (SystemProfile.wordmark_image) — rendered in the
+ // header instead of the platform text when the asset is present. Absent => text.
+@@ -5348,8 +5349,31 @@ static void bind_row_label(const char* label, const ImVec4& colour,
+ // ControllerSpec.buttons[]/button_count (launcher_system.h) so each system
+ // renders its own real vocabulary (SNES: A/B/X/Y/L/R/...; PSX: Triangle/
+ // Circle/Cross/Square/L1/L2/R1/R2/L3/R3/...) instead of a hardcoded SNES set.
++#ifdef SCIV_FRONTEND
++static const char* sciv_binding_label(int b) {
++    static const char* labels[]={
++        "Up - Climb / aim", "Down - Crouch / aim", "Left - Move left", "Right - Move right",
++        "A - Menu confirm", "B - Jump", "X - Unused in gameplay", "Y - Whip / hold to aim",
++        "L - Unused in gameplay", "R - Subweapon", "Start - Pause / confirm", "Select - Unused in gameplay"
++    };
++    return b>=0 && b<12 ? labels[b] : "Unknown";
++}
++#endif
++
+ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+     const int p = m->cfg_player;
++#ifdef SCIV_FRONTEND
++    const bool sciv=true;
++#else
++    const bool sciv=false;
++#endif
++    auto binding_label = [&](int b) -> const char* {
++#ifdef SCIV_FRONTEND
++        return sciv_binding_label(b);
++#else
++        return "";
++#endif
++    };
+     const SystemProfile* cfg_prof = (const SystemProfile*)m->profile;
+     const bool cfg_psx = cfg_prof && cfg_prof->id && !strcmp(cfg_prof->id, "psx");
+     const bool cfg_snes = cfg_prof && cfg_prof->id && !strcmp(cfg_prof->id, "snes");
+@@ -5374,13 +5398,14 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+          * is the player's source -- there is nothing to key a profile on
+          * before that, and a profile saved against "no device" could never be
+          * found again. */
+-        if (cfg_snes) {
++        if (cfg_snes && (!sciv || m->s.player_src[p]==2) &&
++            (!sciv || ImGui::CollapsingHeader("Controller profiles"))) {
+             static bool s_snes_rename_open = false;
+             static char s_snes_rename_buf[64] = {};
+             const bool can_pad = m->s.player_src[p] == 2 &&
+                                  m->s.player_gamepad_guid[p][0];
+ 
+-            ImGui::SameLine();
++            if(sciv) ImGui::Spacing(); else ImGui::SameLine();
+             if (!can_pad) ImGui::BeginDisabled();
+             if (ImGui::Button("Save Profile"))
+                 launcher_binds_save_snes_gamepad(m, p + 1);
+@@ -5570,6 +5595,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+         // noise a player is trying to just clear -- 8% and 12% are different
+         // controllers. Whole percent, because the runner consumes a raw stick
+         // radius derived from this and a fraction would not survive the trip.
++        if(!sciv || m->s.player_src[p]==2) {
+         row_label("Deadzone", th);
+         {
+             int dz = m->s.deadzone[p];
+@@ -5583,6 +5609,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+                                  ImGuiSliderFlags_AlwaysClamp))
+                 launcher_model_set_deadzone(m, p, dz);
+         }
++        }
+     } end_panel();
+ 
+     // Pak for THIS controller port, so it's reachable from the Controller page
+@@ -5645,7 +5672,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+                     if (ImGui::Selectable("None", cur < 0))
+                         launcher_model_set_mouse_bind(m, i, -1);
+                     for (int b = 0; b < spec.button_count; ++b) {
+-                        if (ImGui::Selectable(spec.buttons[b].label, cur == b))
++                        if (ImGui::Selectable((sciv ? binding_label(b) : spec.buttons[b].label), cur == b))
+                             launcher_model_set_mouse_bind(m, i, b);
+                     }
+                     ImGui::EndCombo();
+@@ -5922,7 +5949,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+                             const int b = kPsxGamepadBindOrder[order_i];
+                             ImGui::TableNextColumn();
+                             ImGui::PushID(b);
+-                            bind_row_label(spec.buttons[b].label,
++                            bind_row_label((sciv ? binding_label(b) : spec.buttons[b].label),
+                                            col(th.text_muted), label_col_w,
+                                            px(6.0f));
+                             for (int slot = 0; slot < 2; ++slot) {
+@@ -5945,7 +5972,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+                                     ImGui::PushStyleColor(ImGuiCol_Text, col(th.warn));
+                                 else if (slot && unbound)
+                                     ImGui::PushStyleColor(ImGuiCol_Text, col(th.text_muted));
+-                                if (ImGui::Button(chip, ImVec2(chip_w, 0))) {
++                                if (ImGui::Button(chip, ImVec2(chip_w, sciv ? px(36) : 0))) {
+                                     m->map_all_active = false;
+                                     launcher_model_begin_capture_slot(m, b, slot);
+                                 }
+@@ -6046,7 +6073,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+                             const int b = kPsxGamepadBindOrder[order_i];
+                             ImGui::TableNextColumn();
+                             ImGui::PushID(b);
+-                            bind_row_label(spec.buttons[b].label,
++                            bind_row_label((sciv ? binding_label(b) : spec.buttons[b].label),
+                                            col(th.text_muted), label_col_w,
+                                            px(6.0f));
+                             const bool cap = m->capturing && m->capture_pad &&
+@@ -6060,7 +6087,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+                             const char* chip = wait_rel ? "[ release button... ]"
+                                               : cap     ? "[ press a button... ]"
+                                                         : pl;
+-                            if (ImGui::Button(chip, ImVec2(chip_w, 0))) {
++                            if (ImGui::Button(chip, ImVec2(chip_w, sciv ? px(36) : 0))) {
+                                 m->map_all_active = false;
+                                 m->map_all_wait_release = false;
+                                 launcher_model_begin_pad_capture(m, b);
+@@ -6161,6 +6188,10 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+         if (has_pad) ImGui::Text("INPUT BINDINGS - PLAYER %d", p + 1);
+         else         ImGui::Text("KEYBOARD BINDINGS - PLAYER %d", p + 1);
+         ImGui::PopStyleColor(); ImGui::Spacing();
++        if(sciv) {
++            ImGui::TextWrapped("Choose a binding, then press the key or controller button you want to use. Changes save automatically.");
++            ImGui::Spacing();
++        }
+ 
+         // Rows shown follow the player's ACTIVE pad mode (Genesis 3-Button hides
+         // X/Y/Z/Mode); non-mode systems get their full button_count.
+@@ -6172,7 +6203,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+         // vocab overlaps the bind-chip button next to it.
+         float label_col_w = px(70.0f);
+         for (int b = 0; b < nbtn; ++b) {
+-            float w = ImGui::CalcTextSize(spec.buttons[b].label).x + px(20.0f);
++            float w = ImGui::CalcTextSize((sciv ? binding_label(b) : spec.buttons[b].label)).x + px(20.0f);
+             if (w > label_col_w) label_col_w = w;
+         }
+         // Two chips per row when either the N64 keeps two binds per input
+@@ -6192,7 +6223,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+         // N64 (bpi >= 2) is untouched: its two chips are primary and ALTERNATE
+         // binds for the same input, and both are live.
+         const bool two_chip = (bpi >= 2);
+-        const float chip_w   = two_chip ? px(118.0f) : px(160.0f);
++        const float chip_w   = two_chip ? px(118.0f) : px(sciv ? 180.0f : 160.0f);
+         const float chip_gap = px(6.0f);
+         const float cell_w = two_chip
+             ? (label_col_w + chip_w + chip_gap + chip_w + px(16.0f))
+@@ -6207,7 +6238,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+         // Only when the declared grid matches the buttons actually shown: a pad
+         // MODE can reduce the active count, and an order naming a hidden button
+         // would put a control on screen for an input this mode does not have.
+-        const bool vertical = order && order_rows > 0 && order_cols > 0 &&
++        const bool vertical = !sciv && order && order_rows > 0 && order_cols > 0 &&
+                               order_rows * order_cols == nbtn;
+ 
+         int cols;
+@@ -6218,6 +6249,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+             if (cols < 1) cols = 1;
+             if (cols > 4) cols = 4;
+         }
++        if(sciv) cols=ImGui::GetContentRegionAvail().x >= cell_w*2 ? 2 : 1;
+         // Fixed-width columns, explicitly sized to cell_w: the default
+         // stretch policy divides available width evenly across `cols`
+         // regardless of our computed cell_w, which reintroduces the very
+@@ -6235,7 +6267,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+                     : cell;
+                 ImGui::TableNextColumn();
+                 ImGui::PushID(b);
+-                bind_row_label(spec.buttons[b].label, col(th.text_muted),
++                bind_row_label((sciv ? binding_label(b) : spec.buttons[b].label), col(th.text_muted),
+                                label_col_w, chip_gap);
+                 if (bpi >= 2) {
+                     // Two chips per input: slot 0 primary, slot 1 alternate,
+@@ -6253,7 +6285,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+                             ? "[ press a key... ]"
+                             : (slot == 0 ? m->binds[p][b] : m->binds_alt[p][b]);
+                         if (cap) ImGui::PushStyleColor(ImGuiCol_Button, col(th.accent));
+-                        if (ImGui::Button(txt, ImVec2(chip_w, 0)))
++                        if (ImGui::Button(txt, ImVec2(chip_w, sciv ? px(36) : 0)))
+                             launcher_model_begin_capture_slot(m, b, slot);
+                         if (cap) ImGui::PopStyleColor();
+                         ImGui::PopID();
+@@ -6272,7 +6304,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+                         : (m->pad_binds[p][b][0]
+                             ? m->pad_binds[p][b] : "(unbound)");
+                     if (cap_pad) ImGui::PushStyleColor(ImGuiCol_Button, col(th.accent));
+-                    if (ImGui::Button(cap_pad ? "[ press a button... ]" : pl, ImVec2(chip_w, 0)))
++                    if (ImGui::Button(cap_pad ? "[ press a button... ]" : pl, ImVec2(chip_w, sciv ? px(36) : 0)))
+                         launcher_model_begin_pad_capture(m, b);
+                     if (cap_pad) ImGui::PopStyleColor();
+                     ImGui::PopID();
+@@ -6285,7 +6317,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+                     const char* key_text = settings_player_binds
+                         ? settings_key_label(m->s.player_key_bind[p][b])
+                         : m->binds[p][b];
+-                    if (ImGui::Button(cap_key ? "[ press a key... ]" : key_text, ImVec2(chip_w, 0)))
++                    if (ImGui::Button(cap_key ? "[ press a key... ]" : key_text, ImVec2(chip_w, sciv ? px(36) : 0)))
+                         launcher_model_begin_capture(m, b);
+                     if (cap_key) ImGui::PopStyleColor();
+                 }
+@@ -6385,7 +6417,7 @@ void draw_controller_config_view(LauncherModel* m, const LauncherTheme& th) {
+             } else {
+                 ImGui::TextColored(col(th.accent), "Auto Map %d/%d - press %s%s",
+                                    cell + 1, automap_total,
+-                                   spec.buttons[b].label,
++                                   (sciv ? binding_label(b) : spec.buttons[b].label),
+                                    pad_src ? " on the controller" : "");
+             }
+         } else if (m->capturing) {
+@@ -13298,7 +13330,17 @@ void draw_restore_defaults_modal(LauncherModel* m) {
+     }
+ }
+ 
++#ifdef SCIV_FRONTEND
++#include "sciv_frontend.inc"
++extern "C" void sciv_selftest_controller_tick(unsigned);
++#endif
++
+ void draw_ui(LauncherModel* m, const LauncherTheme& th, int logical_w, int logical_h) {
++#ifdef SCIV_FRONTEND
++    if (m->view == LNG_VIEW_CONTROLLER) draw_sciv_controls(m, th);
++    else draw_sciv_frontend(m, th);
++    return;
++#endif
+     ImGuiViewport* vp = ImGui::GetMainViewport();
+     ImGui::SetNextWindowPos(vp->Pos);
+     ImGui::SetNextWindowSize(vp->Size);
+@@ -13941,6 +13983,16 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
+ #endif
+     launcher_boot_timing_mark("rui:imgui_gl_ready");
+ 
++#ifdef SCIV_FRONTEND
++    g_sciv_background = launcher_texture_load(asset("assets/castlevania/background.tga").c_str());
++    g_sciv_logo = launcher_texture_load(asset("assets/castlevania/logo.tga").c_str());
++    s_sciv_achievement_card=launcher_texture_load(asset("assets/castlevania/achievements/card.png").c_str());
++    for(int i=0;i<SCIV_ACHIEVEMENT_COUNT;i++) {
++        if(!sciv_achievement(i)->id) continue;
++        std::string path=std::string("assets/castlevania/achievements/")+sciv_achievement(i)->badge+".png";
++        s_sciv_badges[i]=launcher_texture_load(asset(path.c_str()).c_str());
++    }
++#endif
+     // Box art: per-game path from the ABI when given (multi-variant repos
+     // stage one file per variant in a shared build dir), else the default.
+     g_boxart = launcher_texture_load(
+@@ -14040,6 +14092,9 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
+         asset("assets/fonts/OpenMoji-black-glyf.ttf");
+     float applied_scale = 0.0f;
+     launcher_debug_init();
++#ifdef SCIV_FRONTEND
++    sciv_begin_frontend();
++#endif
+     /* The ignore/block list, from beside the executable. Loaded once here
+      * rather than lazily on the netplay page: the file is the authority for
+      * whether a chat line is drawn, and a page that renders before the first
+@@ -14055,12 +14110,18 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
+     // that scale so the path can be exercised on a 100% display; nothing here
+     // reads the env var any more.
+     bool first_present_marked = false;
++#ifdef SCIV_FRONTEND
++    int requested_fullscreen = -1;
++#endif
+ 
+     while (m->action == LNG_ACTION_NONE && !p->should_quit) {
+         /* The smoke test closes the window, which is QUIT before boot and
+          * RESUME in session -- the same as a player's close box. */
+         if (smoke_frames > 0 && ++frame > smoke_frames) { p->should_quit = true; break; }
+ 
++#ifdef SCIV_FRONTEND
++        sciv_selftest_controller_tick((unsigned)frame);
++#endif
+         SDL_Event ev;
+         if (SDL_WaitEventTimeout(&ev, 16)) do {
+             /* Window coordinates -> logical units, before anything reads the
+@@ -14068,7 +14129,18 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
+             scale_mouse_event(ev, p->input_scale);
+             if (ev.type == SDL_EVENT_QUIT) p->should_quit = true;
+             if (ev.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) p->should_quit = true;
++#ifdef SCIV_FRONTEND
++            if(sciv_rewind_capture_event(m,ev)) continue;
++#endif
+             if (try_capture(m, ev)) continue;
++#ifdef SCIV_FRONTEND
++            if (ev.type == SDL_EVENT_KEY_DOWN && sciv_save_controller(m, ev)) continue;
++            if (m->in_session && ev.type == SDL_EVENT_KEY_DOWN &&
++                ev.key.key == SDLK_ESCAPE) {
++                m->action = LNG_ACTION_LAUNCH;
++                continue;
++            }
++#endif
+             /* Arm gamepad navigation on the first REAL pad input.
+              *
+              * A control that is already asserted when the launcher opens
+@@ -14100,9 +14172,23 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
+             default:
+                 break;
+             }
++#ifdef SCIV_FRONTEND
++            if (sciv_save_controller(m, ev)) continue;
++            if(m->in_session && !s_sciv_prompt && ev.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
++               ev.gbutton.button == SDL_GAMEPAD_BUTTON_EAST) {
++                m->action = LNG_ACTION_LAUNCH;
++                continue;
++            }
++#endif
+             LNG_ImplSDL_ProcessEvent(&ev);
+         } while (SDL_PollEvent(&ev));
+ 
++#ifdef SCIV_FRONTEND
++        if (requested_fullscreen != m->s.fullscreen) {
++            requested_fullscreen = m->s.fullscreen;
++            launcher_platform_set_fullscreen(p, requested_fullscreen);
++        }
++#endif
+         launcher_platform_refresh_metrics(p);
+         /* Also when a never-seen emoji was registered last frame: the atlas
+          * is static, so it is rebuilt once here, before NewFrame. */
+@@ -14189,7 +14275,11 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
+         {
+             ImGuiIO& nav_io = ImGui::GetIO();
+             if (m->capturing || m->hk_capturing || m->camera_capturing ||
+-                automap_in_progress() || !s_pad_nav_armed)
++                automap_in_progress() || !s_pad_nav_armed
++#ifdef SCIV_FRONTEND
++                || s_sciv_rewind_pad_capture
++#endif
++                )
+                 nav_io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+             else
+                 nav_io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+@@ -14216,6 +14306,10 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
+     launcher_boot_timing_mark("rui:action_requested");
+     launcher_input_shutdown();
+     launcher_boot_timing_mark("rui:input_closed");
++    launcher_texture_free(&g_sciv_background);
++    launcher_texture_free(&g_sciv_logo);
++    for(auto &badge : s_sciv_badges) launcher_texture_free(&badge);
++    launcher_texture_free(&s_sciv_achievement_card);
+     launcher_texture_free(&g_boxart);
+     launcher_texture_free(&g_pad);
+     launcher_texture_free(&g_pad_analog);
+diff --git a/src/common/launcher_debug.c b/src/common/launcher_debug.c
+index f56e631..0b29c3a 100644
+--- a/src/common/launcher_debug.c
++++ b/src/common/launcher_debug.c
+@@ -200,6 +200,13 @@ void launcher_debug_step(LauncherPlatform* p, LauncherModel* m) {
+         launcher_model_begin_capture(m, atoi(c + 7));   // rebind a player button (generic spec index)
+     } else if (strncmp(c, "caphk:", 6) == 0) {
+         launcher_model_begin_hk_capture(m, (LngHotkey)atoi(c + 6)); // rebind a hotkey
++    } else if (strncmp(c, "fullscreen:", 11) == 0) {
++        launcher_model_set_fullscreen(m, atoi(c + 11));
++    } else if (strcmp(c, "window-state") == 0) {
++        fprintf(stderr, "[dbg] window-state: requested=%d applied=%d flags=%llu size=%dx%d windowed=%dx%d\n",
++                m->s.fullscreen, p->fullscreen_mode,
++                (unsigned long long)SDL_GetWindowFlags(p->window),
++                p->logical_w, p->logical_h, p->windowed_w, p->windowed_h);
+     } else if (strncmp(c, "size:", 5) == 0) {
+         int w = 0, h = 0;
+         if (sscanf(c + 5, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+@@ -209,6 +216,15 @@ void launcher_debug_step(LauncherPlatform* p, LauncherModel* m) {
+     } else if (strncmp(c, "click:", 6) == 0) {
+         float x = 0, y = 0;
+         if (sscanf(c + 6, "%f,%f", &x, &y) == 2) synth_click(p, x, y);
++    } else if (strncmp(c, "padbutton:", 10) == 0) {
++        /* Exercise controller capture through the same event path as a pad. */
++        SDL_Event event;
++        SDL_zero(event);
++        event.type = SDL_EVENT_GAMEPAD_BUTTON_DOWN;
++        event.gbutton.button = (Uint8)atoi(c + 10);
++        SDL_PushEvent(&event);
++        event.type = SDL_EVENT_GAMEPAD_BUTTON_UP;
++        SDL_PushEvent(&event);
+     } else if (strncmp(c, "key:", 4) == 0) {
+         if (strcmp(c + 4, "escape") == 0) synth_key(SDLK_ESCAPE);
+         else {
+diff --git a/src/common/launcher_ng_capi.c b/src/common/launcher_ng_capi.c
+index f696b0c..cb38e9e 100644
+--- a/src/common/launcher_ng_capi.c
++++ b/src/common/launcher_ng_capi.c
+@@ -223,7 +223,9 @@ int recomp_launcher_run_window(const char* window_title,
+ 
+     LngAction act = launcher_backend_run(&plat, &model, &theme);
+ 
+-    launcher_window_size_save(window_size_path, plat.logical_w, plat.logical_h);
++    launcher_window_size_save(window_size_path,
++        plat.fullscreen_mode ? plat.windowed_w : plat.logical_w,
++        plat.fullscreen_mode ? plat.windowed_h : plat.logical_h);
+     launcher_platform_close(&plat);
+     launcher_boot_timing_mark("rui:platform_closed");
+ 
+diff --git a/src/common/launcher_platform.h b/src/common/launcher_platform.h
+index 524f73c..68a3555 100644
+--- a/src/common/launcher_platform.h
++++ b/src/common/launcher_platform.h
+@@ -50,6 +50,8 @@ typedef struct LauncherPlatform {
+     bool  scale_changed;   // set for one frame after a DPI/monitor change
+     bool  size_changed;    // set for one frame after a resize
+     bool  should_quit;     // window close requested
++    int fullscreen_mode;  // 0 windowed, 1 borderless, 2 exclusive
++    int windowed_w, windowed_h; // logical size before entering fullscreen
+ } LauncherPlatform;
+ 
+ // Create the window (RESIZABLE + HIGH_PIXEL_DENSITY) and a GL 3.3 core context.
+@@ -57,6 +59,8 @@ typedef struct LauncherPlatform {
+ bool launcher_platform_open(LauncherPlatform* p, const char* title,
+                             int logical_w, int logical_h);
+ 
++bool launcher_platform_set_fullscreen(LauncherPlatform* p, int mode);
++
+ // Apply an image file as the window / taskbar icon. The launcher and the game
+ // it boots are one product to the player, so the launcher must not sit in the
+ // task switcher under the toolkit's default placeholder while the game beside
+diff --git a/src/common/launcher_platform_sdl2.c b/src/common/launcher_platform_sdl2.c
+index 2595ce3..a9681c4 100644
+--- a/src/common/launcher_platform_sdl2.c
++++ b/src/common/launcher_platform_sdl2.c
+@@ -292,6 +292,36 @@ bool launcher_platform_open(LauncherPlatform* p, const char* title,
+     return true;
+ }
+ 
++bool launcher_platform_set_fullscreen(LauncherPlatform* p, int mode) {
++    if (!p || !p->window || mode < 0 || mode > 2) return false;
++    if (mode == p->fullscreen_mode) return true;
++    if (!p->fullscreen_mode) {
++        launcher_platform_refresh_metrics(p);
++        p->windowed_w = p->logical_w;
++        p->windowed_h = p->logical_h;
++    }
++    if (mode == 2) {
++        SDL_DisplayMode desktop;
++        int display = SDL_GetWindowDisplayIndex(p->window);
++        if (SDL_GetDesktopDisplayMode(display, &desktop) != 0 ||
++            SDL_SetWindowDisplayMode(p->window, &desktop) != 0) goto failed;
++    }
++    if (SDL_SetWindowFullscreen(p->window, mode == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP :
++                                mode == 2 ? SDL_WINDOW_FULLSCREEN : 0) != 0) goto failed;
++    p->fullscreen_mode = mode;
++    launcher_platform_refresh_metrics(p);
++    return true;
++failed:
++    fprintf(stderr, "[launcher] Fullscreen mode %d failed: %s\n", mode, SDL_GetError());
++    if (mode == 2 && SDL_SetWindowFullscreen(p->window, SDL_WINDOW_FULLSCREEN_DESKTOP) == 0) {
++        p->fullscreen_mode = 1;
++        launcher_platform_refresh_metrics(p);
++        fprintf(stderr, "[launcher] Using borderless fullscreen instead.\n");
++        return true;
++    }
++    return false;
++}
++
+ void launcher_platform_set_icon(LauncherPlatform* p, const char* image_path) {
+     if (!p || !p->window || !image_path || !image_path[0]) return;
+     int w = 0, h = 0;
+diff --git a/src/common/launcher_platform_sdl3.c b/src/common/launcher_platform_sdl3.c
+index 3ccb150..fe9158a 100644
+--- a/src/common/launcher_platform_sdl3.c
++++ b/src/common/launcher_platform_sdl3.c
+@@ -219,6 +219,36 @@ bool launcher_platform_open(LauncherPlatform* p, const char* title,
+     return true;
+ }
+ 
++bool launcher_platform_set_fullscreen(LauncherPlatform* p, int mode) {
++    if (!p || !p->window || mode < 0 || mode > 2) return false;
++    if (mode == p->fullscreen_mode) return true;
++    if (!p->fullscreen_mode) {
++        launcher_platform_refresh_metrics(p);
++        p->windowed_w = p->logical_w;
++        p->windowed_h = p->logical_h;
++    }
++    const SDL_DisplayMode* desktop = mode == 2 ?
++        SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(p->window)) : NULL;
++    if ((mode == 2 && !desktop) ||
++        !SDL_SetWindowFullscreenMode(p->window, desktop) ||
++        !SDL_SetWindowFullscreen(p->window, mode != 0)) {
++        fprintf(stderr, "[launcher] Fullscreen mode %d failed: %s\n", mode, SDL_GetError());
++        if (mode == 2 && SDL_SetWindowFullscreenMode(p->window, NULL) &&
++            SDL_SetWindowFullscreen(p->window, true)) {
++            p->fullscreen_mode = 1;
++            SDL_SyncWindow(p->window);
++            launcher_platform_refresh_metrics(p);
++            fprintf(stderr, "[launcher] Using borderless fullscreen instead.\n");
++            return true;
++        }
++        return false;
++    }
++    p->fullscreen_mode = mode;
++    SDL_SyncWindow(p->window);
++    launcher_platform_refresh_metrics(p);
++    return true;
++}
++
+ void launcher_platform_set_icon(LauncherPlatform* p, const char* image_path) {
+     if (!p || !p->window || !image_path || !image_path[0]) return;
+     int w = 0, h = 0;

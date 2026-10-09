@@ -1,0 +1,22 @@
+diff --git a/runner/src/snes/interp_bridge.c b/runner/src/snes/interp_bridge.c
+index c1e48eb..3437123 100644
+--- a/runner/src/snes/interp_bridge.c
++++ b/runner/src/snes/interp_bridge.c
+@@ -1643,7 +1643,7 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
+          * the CPU H/V comparator or a coprocessor asserts IRQ; otherwise a
+          * perfectly live hardware-poll loop can monopolize the bridge and
+          * starve the handler forever. */
+-        if (auto_quiescent && steps && !in.i && g_snes &&
++        if ((auto_quiescent || stop_on_rti) && steps && !in.i && g_snes &&
+             (g_snes->inIrq ||
+              (g_snes->cart && g_snes->cart->superfx &&
+               g_snes->cart->superfx->irq_pending) ||
+@@ -1659,7 +1659,7 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
+             bridge_apu_flush(cpu);
+             return 1;
+         }
+-        if (auto_quiescent && s_lle_master_deadline &&
++        if ((auto_quiescent || stop_on_rti) && s_lle_master_deadline &&
+             cpu->master_cycles >= s_lle_master_deadline) {
+             lle_resume_set(pc_before, INTERP_RESUME_SITE_DEADLINE, in.sp);
+             sync_interp_to_cpu(&in,cpu);
