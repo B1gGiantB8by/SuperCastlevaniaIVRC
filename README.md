@@ -72,7 +72,23 @@ Run `build/SuperCastlevaniaIvSNESRecomp.exe` on Windows, or `build/SuperCastleva
 ./build/SuperCastlevaniaIvSNESRecomp "/path/to/Super Castlevania IV (USA).sfc"
 ```
 
-The repository publishes source. The manual [Release workflow](../../actions/workflows/release.yml) builds setup packs that generate and rebuild the game from a player's own ROM. Platform packages require a successful workflow run; the locally tested build is Windows.
+The repository publishes source. The manual [Release workflow](https://github.com/B1gGiantB8by/SuperCastlevaniaIVRC/actions/workflows/release.yml) builds setup packs that generate and rebuild the game from a player's own ROM. Platform packages require a successful workflow run; the locally tested build is Windows.
+
+## Publishing release packages
+
+The Release workflow is already included in this repository and runs manually. It builds setup packs for Windows, Linux, macOS Apple Silicon, and macOS Intel. Each player supplies their own ROM; no ROM upload is required to run the workflow.
+
+To build packages for the existing **v0.1.0** tag:
+
+1. Open [Actions → Release](https://github.com/B1gGiantB8by/SuperCastlevaniaIVRC/actions/workflows/release.yml) and click **Run workflow**.
+2. Under **Use workflow from**, select the **v0.1.0 tag**.
+3. Set **Version** to `0.1.0`.
+4. Keep **Publish release** and **Embed toolchain** checked; leave the remaining inputs at their defaults.
+5. Run the workflow. After every platform build succeeds, downloads and checksums appear on the [Releases page](https://github.com/B1gGiantB8by/SuperCastlevaniaIVRC/releases).
+
+If preflight reports that `tag v0.1.0 already exists`, select that tag instead of `main`. The workflow refuses to publish an existing version from a branch. To publish later changes from `main`, choose a new version such as `0.1.1`; leaving Version blank automatically bumps the latest tag according to the Bump input.
+
+Uncheck **Publish release** to build workflow artifacts without creating a public release. A failed build does not publish packages; inspect the failed step's log in Actions before retrying.
 
 ## Controls and saves
 
@@ -87,6 +103,16 @@ Starting a mode or a selected stage replaces the current session. Save your camp
 Supply your own patched `SuperCastlevaniaIVOtherCastle.sfc` and select **Other Modes → Other Castle (Easy)**. Apply the Easy xdelta patch separately before selecting the ROM. Neither the ROM nor the patch is included here.
 
 The supported patched image is 4 MiB with SHA-256 `8e920c40c3810d624f686d231ec884507a421e35e3e2ab4f541c3b9e596d3f40`. It runs through the interpreter, uses separate saves in `saves/other-castle/`, and disables stock campaign achievements and additional modes. Choose **Return to Original Game** to switch back. Direct launch: `--other-castle --rom "/path/to/patched.sfc"`.
+
+## MSU-1 soundtrack (local development)
+
+This feature is present in the current local development build. Its implementation is not included in the published v0.1.0 tag or the current GitHub source.
+
+Open **Audio → Choose MSU-1 ROM**, select your patched USA ROM, then choose **Play MSU-1 Soundtrack**. This option also appears in the paused frontend; the title overlay links to it under **Options → Audio → MSU-1 Soundtrack**. Switching restarts the game. Choose **Return to Original Soundtrack** to restart with your original USA ROM.
+
+The supported patched ROM is 1 MiB with SHA-256 `49e8321030cc5d923a1b03cd8ff83843e0fd0a2445a7799b945ba736dd91be3d`. Keep `<ROM filename without extension>-<track>.pcm` and the `.msu` file beside it. This ROM uses interpreter execution and separate saves under `saves/msu1/`. Selecting the ROM directly on the command line automatically detects this build; `--msu-game --rom "/path/to/patched.sfc"` also works. The patched ROM and soundtrack are player supplied.
+
+Save states and rewind do not restore the MSU-1 stream position; music may resume from a different point after using them. Full soundtrack and mode compatibility are still experimental.
 
 ## Achievements
 
@@ -106,6 +132,36 @@ Save-state loading and rewind invalidate ongoing damage-free, full-quest, and si
 | `snesrecomp/`, `recomp-ui/` | Pinned upstream dependencies |
 
 Regression scripts cover achievements, Boss Rush, Level Select, One Life, Other Castle, title menus, timing, shaders, and rewind. Some smoke checks require a built executable and the local ROM; see each `tools/test-*.ps1` script for options. Widescreen checks are retained for development.
+
+## Motion interpolation (local development)
+
+This experimental feature is present in the current local development build. Its implementation is not included in the published v0.1.0 tag or the current GitHub source.
+
+Experimental sprite/camera interpolation is available in the title menu under
+Options > Video > Motion (Experimental), or in the launcher/pause menu under
+Display Options > Motion (Experimental). It is off by default and persists in
+interpolation.cfg. SCIV_INTERPOLATION=1 enables it for a test run. Game updates
+retain their original clock; presentations target the display refresh above
+60 Hz, otherwise approximately 120 Hz. A high-refresh display is needed to
+see the extra frames. Standard Mode 1 gameplay interpolates compatible OAM
+positions and BG1/BG2/BG3 scrolls below the HUD at native pixel resolution, with current-frame
+artwork. The HUD strip, menus, Mode 7, widescreen, room changes, sprite identity
+changes and large jumps retain original positions. This adds up to one game
+frame of visual latency. Motion automatically disables Frame Blend to prevent
+sprite trails; enabling Frame Blend in the title menu turns Motion off. Other
+Castle and MSU variants have not been visually validated. The replay stores
+about 15 MiB of raster state and adds rendering work per intermediate frame.
+
+
+When BG1/BG2/BG3 tilemaps change (for example, a ledge crumbles), Motion presents
+an original frame for that transition instead of interpolating changed terrain.
+Sprite motion also requires unchanged underlying tile artwork, not only matching
+OAM tile numbers. This conservative fallback can briefly reduce smoothness.
+
+OAM is draw order rather than object identity: sprite matching now searches
+across slots for a unique mutual nearest match in world coordinates with
+unchanged artwork. This keeps repeated ledge tiles stationary when the game
+rotates its sprite table; ambiguous matches retain the camera-only fallback.
 
 ## Credits and license
 
