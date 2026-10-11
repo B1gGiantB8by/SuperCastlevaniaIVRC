@@ -1,18 +1,22 @@
 diff --git a/src/common/backends/imgui/sciv_frontend.inc b/src/common/backends/imgui/sciv_frontend.inc
 new file mode 100644
-index 0000000..8bed04a
+index 0000000..802f46d
 --- /dev/null
 +++ b/src/common/backends/imgui/sciv_frontend.inc
-@@ -0,0 +1,582 @@
+@@ -0,0 +1,623 @@
++#include "cheats.h"
 +#include "snes_savestate_menu.h"
 +#include "boss_rush.h"
 +#include "game_timing.h"
++#include "sciv_interpolation.h"
 +#include "bezel.h"
 +#include "level_select.h"
 +#include "achievements.h"
 +#include "other_castle.h"
++#include "msu_support.h"
 +static LauncherTexture s_sciv_badges[SCIV_ACHIEVEMENT_COUNT], s_sciv_achievement_card;
 +static int s_sciv_page = 0;
++extern "C" void sciv_open_audio_settings(void) { s_sciv_page=2; }
 +static bool s_sciv_rewind_pad_capture=false;
 +static bool s_sciv_focus_slots = false;
 +static int s_sciv_slot = 0;
@@ -98,19 +102,19 @@ index 0000000..8bed04a
 +        return true;
 +    }
 +    if (!s_sciv_slots_active && b == SDL_GAMEPAD_BUTTON_DPAD_RIGHT) {
-+        if (s_sciv_nav_item == 8) return true;
++        if (s_sciv_nav_item == 9) return true;
 +        s_sciv_slots_active = true;
 +        s_sciv_focus_slots = true;
 +        return true;
 +    }
 +    if (!s_sciv_slots_active) {
 +        if(b==SDL_GAMEPAD_BUTTON_DPAD_UP || b==SDL_GAMEPAD_BUTTON_DPAD_DOWN) {
-+            s_sciv_nav_item=(s_sciv_nav_item+(b==SDL_GAMEPAD_BUTTON_DPAD_DOWN ? 1 : 8))%9;
++            s_sciv_nav_item=(s_sciv_nav_item+(b==SDL_GAMEPAD_BUTTON_DPAD_DOWN ? 1 : 9))%10;
 +            s_sciv_focus_nav=true;
 +            return true;
 +        }
 +        if(b==SDL_GAMEPAD_BUTTON_SOUTH) {
-+            if(s_sciv_nav_item==8) { m->action=LNG_ACTION_QUIT; return true; }
++            if(s_sciv_nav_item==9) { m->action=LNG_ACTION_QUIT; return true; }
 +            s_sciv_page=s_sciv_nav_item;
 +            s_sciv_focus_options=true;
 +            if(s_sciv_page==5) { s_sciv_slots_active=true; s_sciv_focus_slots=true; }
@@ -183,14 +187,14 @@ index 0000000..8bed04a
 +        ImGui::Image(tid(g_sciv_logo),ImVec2(logo_w,logo_w*571.f/1468.f));
 +    } else ImGui::TextUnformatted("SUPER CASTLEVANIA IV");
 +    ImGui::TextColored(ImVec4(1,.78f,.3f,1),"%s",m->in_session ? "GAME PAUSED" : "SUPER NINTENDO RECOMPILATION");
-+    const char *pages[] = {m->in_session ? "Resume Game" : "Start Game","Display Options","Audio Options","Controls","Mods","Save States","Other Modes","Achievements"};
++    const char *pages[] = {m->in_session ? "Resume Game" : "Start Game","Display Options","Audio Options","Controls","Mods","Save States","Other Modes","Achievements","Cheats / Game Genie"};
 +    const float nav_w=std::min(175.f,width*.32f);
 +    const float footer_h=ImGui::GetFrameHeightWithSpacing()+ImGui::GetTextLineHeightWithSpacing()+8.f;
 +    ImGui::BeginChild("##sciv-nav",ImVec2(nav_w,-footer_h),ImGuiChildFlags_Borders|ImGuiChildFlags_NavFlattened);
 +    bool focus=s_sciv_focus_options;
 +    s_sciv_focus_options=false;
 +    if(s_sciv_focus_nav) ImGui::SetWindowFocus();
-+    for(int i=0;i<8;++i) {
++    for(int i=0;i<9;++i) {
 +        if(s_sciv_focus_nav && i==s_sciv_nav_item) ImGui::SetKeyboardFocusHere();
 +        if(ImGui::Selectable(pages[i],page==i,0,ImVec2(0,34))) {
 +            page=i; s_sciv_nav_item=i; focus=true;
@@ -200,15 +204,24 @@ index 0000000..8bed04a
 +            ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(),ImGui::GetItemRectMax(),IM_COL32(255,199,50,255),4,0,2);
 +    }
 +    ImGui::Spacing();
-+    if(s_sciv_focus_nav && s_sciv_nav_item==8) ImGui::SetKeyboardFocusHere();
++    if(s_sciv_focus_nav && s_sciv_nav_item==9) ImGui::SetKeyboardFocusHere();
 +    if(ImGui::Button("Quit Game",ImVec2(-1,36))) m->action=LNG_ACTION_QUIT;
-+    if(page==5 && !s_sciv_slots_active && s_sciv_nav_item==8)
++    if(page==5 && !s_sciv_slots_active && s_sciv_nav_item==9)
 +        ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(),ImGui::GetItemRectMax(),IM_COL32(255,199,50,255),4,0,2);
 +    s_sciv_focus_nav = false;
 +    ImGui::EndChild(); ImGui::SameLine();
 +    ImGui::BeginChild("##sciv-options",ImVec2(0,-footer_h),ImGuiChildFlags_Borders|ImGuiChildFlags_NavFlattened);
 +    ImGui::TextUnformatted(pages[page]); ImGui::Separator(); ImGui::Spacing();
 +    if(focus) { ImGui::SetScrollY(0); ImGui::SetKeyboardFocusHere(); }
++    if(page==8) {
++        const char *labels[]={"Infinite Lives","Invincibility","Start with 98 Hearts","Stop Timer"};
++        for(int i=0;i<SCIV_CHEAT_COUNT;i++) {
++            bool enabled=sciv_cheat_get(i)!=0;
++            if(ImGui::Checkbox(labels[i],&enabled))sciv_cheat_set(i,enabled);
++        }
++        ImGui::Spacing();
++        ImGui::TextWrapped("98 Hearts applies at the start of each life. Invincibility prevents enemy damage; pits still cost a life.");
++    }
 +    if(page==0) {
 +        if(!m->in_session) {
 +            ImGui::TextWrapped("%s",m->rom_present ? m->rom_file : "Select your Super Castlevania IV (USA) ROM.");
@@ -232,9 +245,34 @@ index 0000000..8bed04a
 +        if(ImGui::Combo("Game Speed / Timing", &timing, "Original\0Enhanced\0")) sciv_timing_set(timing);
 +        ImGui::TextWrapped("Original preserves SNES slowdown. Enhanced gives the CPU twice the processing budget to reduce slowdown throughout the game, while keeping video and music at their normal rate.");
 +        ImGui::Spacing(); ImGui::Separator();
++        bool motion=sciv_interpolation_enabled()!=0;
++        if(ImGui::Checkbox("Motion (Experimental)", &motion)) {
++            sciv_interpolation_set(motion);
++        }
++        ImGui::TextWrapped("Smoother sprite and camera movement on high-refresh displays, with original gameplay pacing. Standard gameplay only; adds up to one frame of visual delay. Frame Blend is disabled while Motion is on.");
++        if(motion && m->s.frame_blend) launcher_model_toggle_frame_blend(m);
++        ImGui::Spacing(); ImGui::Separator();
 +        draw_display_controls(m,th);
++        if(motion && m->s.frame_blend) launcher_model_toggle_frame_blend(m);
 +    }
-+    else if(page==2) draw_audio_controls(m,th);
++    else if(page==2) {
++        draw_audio_controls(m,th);
++        static char msu_path[4096], msu_error[256];
++        if(!msu_path[0]) {FILE *f=fopen("msu-rom.cfg","r");if(f){if(fgets(msu_path,sizeof(msu_path),f))msu_path[strcspn(msu_path,"\r\n")]=0;fclose(f);}}
++        ImGui::Separator(); ImGui::Text("Soundtrack: %s",sciv_msu_active() ? "MSU-1" : "Original SPC");
++        ImGui::TextWrapped("Choose the USA MSU-1 patched ROM. Keep its .pcm and .msu files beside it with the same filename prefix. Switching restarts the game.");
++        if(ImGui::Button("Choose MSU-1 ROM")) {
++            ui_pick_file(m,"MSU-1 patched USA ROM",{"*.sfc","*.smc"},"SNES ROM",[](const char *path) {
++                if(!path) return;
++                snprintf(msu_path,sizeof(msu_path),"%s",path);
++                FILE *f=fopen("msu-rom.cfg","w");if(f){fprintf(f,"%s\n",msu_path);fclose(f);}msu_error[0]=0;
++            });
++        }
++        ImGui::TextWrapped("%s",msu_path);
++        if(ImGui::Button("Play MSU-1 Soundtrack")) {if(sciv_msu_launch(msu_path,msu_error,sizeof(msu_error)))m->action=LNG_ACTION_QUIT;}
++        if(sciv_msu_active() && ImGui::Button("Return to Original Soundtrack")) {if(sciv_other_castle_launch(0,msu_error,sizeof(msu_error)))m->action=LNG_ACTION_QUIT;}
++        if(msu_error[0])ImGui::TextWrapped("%s",msu_error);
++    }
 +    else if(page==3) draw_player_panel(m,th,0,ImGui::GetContentRegionAvail().x);
 +    else if(page==4) {
 +        draw_mods(m,th);
@@ -336,18 +374,19 @@ index 0000000..8bed04a
 +        static char castle_error[256]={0};
 +        ImGui::TextWrapped("ROM: %s",sciv_other_castle_path(1)[0] ? sciv_other_castle_path(1) : "Choose a patched ROM");
 +        if(ImGui::Button("Choose Other Castle ROM",ImVec2(-1,36))) {
-+            const char *patterns[]={"*.sfc","*.smc"}; char path[4096];
-+            if(launcher_pick_file("Other Castle patched ROM",patterns,2,"SNES ROM",path,sizeof(path))) {
++            ui_pick_file(m,"Other Castle patched ROM",{"*.sfc","*.smc"},"SNES ROM",[](const char *path) {
++                if(!path) return;
 +                sciv_other_castle_set_path(1,path); castle_error[0]=0;
-+            }
++            });
 +        }
 +        if(ImGui::Button(sciv_other_castle_active() ? "Restart Other Castle" : "Play Other Castle",ImVec2(-1,48))) {
 +            if(sciv_other_castle_launch(1,castle_error,sizeof(castle_error))) m->action=LNG_ACTION_QUIT;
 +        }
 +        if(sciv_other_castle_active()) {
 +            if(ImGui::Button("Choose Original USA ROM",ImVec2(-1,36))) {
-+                const char *patterns[]={"*.sfc","*.smc"}; char path[4096];
-+                if(launcher_pick_file("Original USA ROM",patterns,2,"SNES ROM",path,sizeof(path))) sciv_other_castle_set_path(0,path);
++                ui_pick_file(m,"Original USA ROM",{"*.sfc","*.smc"},"SNES ROM",[](const char *path) {
++                    if(path) sciv_other_castle_set_path(0,path);
++                });
 +            }
 +            if(ImGui::Button("Return to Original Game",ImVec2(-1,40))) {
 +                if(sciv_other_castle_launch(0,castle_error,sizeof(castle_error))) m->action=LNG_ACTION_QUIT;
@@ -586,3 +625,5 @@ index 0000000..8bed04a
 +    ImGui::PopStyleVar(2);
 +    ImGui::PopStyleColor(10);
 +}
++
++

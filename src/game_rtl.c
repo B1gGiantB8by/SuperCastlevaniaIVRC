@@ -1,3 +1,5 @@
+#include "cheats.h"
+#include "sciv_interpolation.h"
 /*
  * Super Castlevania IV — per-game runtime glue.
  *
@@ -42,9 +44,18 @@
 
 #include "beam_frame_driver.h"
 #include "common_rtl.h"
+#include "host_main.h"
+#include "rumble.h"
 #include "snes/saveload.h"
 #include <stdlib.h>
 #include <stdio.h>
+
+static ScivRumbleFrame rumble_frame(void) {
+#define WORD(p) (g_ram[p] | (g_ram[(p)+1] << 8))
+    ScivRumbleFrame frame = { WORD(0x32), WORD(0x70), WORD(0x86), WORD(0x13f4) };
+#undef WORD
+    return frame;
+}
 
 static void GameSaveExecution(SaveLoadInfo *sli) {
     RtlSaveExecutionState(sli);
@@ -61,7 +72,9 @@ static void GameLoadExecution(SaveLoadInfo *sli, uint32_t version) {
 }
 
 static void GameExecutionLoaded(uint32_t version) {
+    sciv_cheats_reset();
     sciv_title_reset();
+    sciv_interpolation_reset();
     (void)version;
     RtlApplyExecutionState();
     if(sciv_other_castle_active()) return;
@@ -83,8 +96,18 @@ void GameRunOneFrame(void)
             fprintf(stderr, "[timing] gameplay fields=%u busy-at-vblank=%u\n",
                     timing_frames, timing_busy);
     }
+    /* Compare within this frame so loading/rewinding a state cannot be
+     * mistaken for damage. Ignore room transitions and non-gameplay states. */
+    const ScivRumbleFrame before = rumble_frame();
+    sciv_cheats_before_frame();
     snes_beam_frame_driver_run_frame();
+    sciv_cheats_after_frame();
     if(sciv_other_castle_active()) return;
+    const int rumble = sciv_rumble_event(before, rumble_frame());
+    if (rumble == SCIV_RUMBLE_DAMAGE)
+        snesrecomp_desktop_rumble(0, 0x8000, 0x4000, 150);
+    else if (rumble == SCIV_RUMBLE_WHIP)
+        snesrecomp_desktop_rumble(0, 0x4000, 0x6000, 100);
     sciv_achievements_tick();
     sciv_boss_rush_tick();
     sciv_one_life_tick();
@@ -95,12 +118,14 @@ void GameRunOneFrame(void)
 void GameDrawPpuFrame(void)
 {
     sciv_widescreen_draw_policy();
-    snes_beam_frame_driver_draw_ppu_frame();
+    sciv_interpolation_raster();
 }
 
 void GameSessionReset(void)
 {
+    sciv_cheats_reset();
     sciv_title_reset();
+    sciv_interpolation_reset();
     /* Rematch / soft-return: clear anything that must not survive a new
      * session. recomp-ai-rules/NETPLAY.md §3 — sticky state that "has always
      * been fine" is the usual desync culprit, because single-player never
@@ -136,3 +161,5 @@ const RtlGameInfo kGameInfo = {
     .state_load_extra = &GameLoadExecution,
     .on_state_loaded = &GameExecutionLoaded,
 };
+
+

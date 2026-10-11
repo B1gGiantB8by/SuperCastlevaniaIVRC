@@ -1,0 +1,24 @@
+diff --git a/runner/src/desktop/host_main.c b/runner/src/desktop/host_main.c
+--- a/runner/src/desktop/host_main.c
++++ b/runner/src/desktop/host_main.c
+@@ -2909,3 +2909,9 @@
+   g_overlay_modal = true;
+   SetAudioPaused(true);
++  /* Two fullscreen windows in one process must not compete for the display.
++   * Release the game's fullscreen ownership before the launcher takes it. */
++  const uint32 launcher_fullscreen = SDL_GetWindowFlags(g_window) &
++      (SNESRECOMP_SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_FULLSCREEN);
++  if (launcher_fullscreen)
++    SDL_SetWindowFullscreen(g_window, 0);
+   SDL_HideWindow(g_window);
+@@ -2927,3 +2933,10 @@
+   SDL_ShowWindow(g_window);
++  SDL_RestoreWindow(g_window);
+   SDL_RaiseWindow(g_window);
++  /* Acquire fullscreen only after the game is visible and focused again. */
++  if (launcher_fullscreen)
++    SDL_SetWindowFullscreen(g_window, launcher_fullscreen);
++  SDL_PumpEvents();
++  host_report_breadcrumb("in-game launcher: restored window flags=0x%x",
++                         (unsigned)SDL_GetWindowFlags(g_window));
+   /* Closing the launcher's window can queue an application quit (its window

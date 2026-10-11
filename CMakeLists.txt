@@ -40,10 +40,13 @@ add_executable(SuperCastlevaniaIvSNESRecomp
     ${SNESRECOMP_RUNNER_SOURCES}
     src/main.c
     src/title_menu.c
+    src/cheats.c
+    src/msu_support.c
     src/other_castle.c
     src/host_contract.c
     src/game_rtl.c
     src/game_timing.c
+    src/sciv_interpolation.c
     src/bezel.c
     src/sciv_widescreen.c
     src/sciv_widescreen_tiles.c
@@ -53,6 +56,15 @@ add_executable(SuperCastlevaniaIvSNESRecomp
     src/achievement_sound.c
     src/gen_stubs.c
 )
+
+# Windows uses the embedded wallmeat icon for Explorer and application windows.
+if(WIN32)
+    enable_language(RC)
+    target_sources(SuperCastlevaniaIvSNESRecomp PRIVATE assets/icons/wallmeat.rc)
+    set_property(SOURCE assets/icons/wallmeat.rc PROPERTY OBJECT_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/icons/wallmeat.ico")
+    target_include_directories(SuperCastlevaniaIvSNESRecomp PRIVATE assets/icons)
+endif()
 
 # ROM identity. rom_identity.txt is the one place the digests live: the build
 # turns it into snesrecomp_rom_identity.h (SNESRECOMP_ROM_EXPECTED_SHA256 and
@@ -152,3 +164,5 @@ target_include_directories(SuperCastlevaniaIvSNESRecomp PRIVATE
 # Title-specific Kickle-style frontend and runtime menu shortcuts.
 target_compile_definitions(SuperCastlevaniaIvSNESRecomp PRIVATE SCIV_FRONTEND=1)
 snesrecomp_target_stage_dir(SuperCastlevaniaIvSNESRecomp ${CMAKE_SOURCE_DIR}/assets/castlevania assets/castlevania)
+
+

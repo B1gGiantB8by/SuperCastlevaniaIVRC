@@ -28,6 +28,7 @@
 #include "host_main.h"
 #include "game_rtl.h"
 #include "game_timing.h"
+#include "sciv_interpolation.h"
 #include "bezel.h"
 #include "sciv_widescreen.h"
 #include "boss_rush.h"
@@ -36,7 +37,9 @@
 #include "achievement_overlay.h"
 #include "achievement_sound.h"
 #include "other_castle.h"
+#include "msu_support.h"
 #include "title_menu.h"
+#include "cheats.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,20 +59,26 @@
 #endif
 
 static void sciv_after_config(void) {
+    sciv_cheats_init();
     sciv_other_castle_init();
     sciv_achievements_init();
     sciv_timing_init();
+    sciv_interpolation_init();
     sciv_bezel_init();
     sciv_widescreen_init();
 }
+static void sciv_rom_loaded(const unsigned char *rom,size_t size) { sciv_other_castle_rom_loaded(rom,size);sciv_msu_rom_loaded(rom,size); }
 static SnesDesktopHostGame kGameHost = {
-    .on_rom_loaded       = sciv_other_castle_rom_loaded,
+    .on_rom_loaded       = sciv_rom_loaded,
     .in_game_launcher   = 1,
     .display_aspect_supported = 1,
     .shader_supported   = 1,
     .compute_viewport    = sciv_bezel_viewport,
     .native_widescreen   = 1,
     .prepare_frame      = sciv_widescreen_prepare,
+    .draw_frame         = sciv_interpolation_draw,
+    .presentation_hz    = sciv_interpolation_hz,
+    .on_reset           = sciv_interpolation_reset,
     .hold_rewind         = true,
     .display_name        = "Super Castlevania IV",
     .window_title        = "Super Castlevania IV",
@@ -99,9 +108,14 @@ static SnesDesktopHostGame kGameHost = {
 int main(int argc, char **argv)
 {
     int selected = -1;
+    int msu_selected = -1;
     const char *rom_path = NULL;
     for(int i=1;i<argc;i++) {
-        if(strcmp(argv[i],"--other-castle")==0 || strcmp(argv[i],"--stock-game")==0) {
+        if(strcmp(argv[i],"--msu-game")==0) {
+            msu_selected=1;
+            for(int j=i;j<argc;j++) argv[j]=argv[j+1];
+            --argc; --i;
+        } else if(strcmp(argv[i],"--other-castle")==0 || strcmp(argv[i],"--stock-game")==0) {
             selected=strcmp(argv[i],"--other-castle")==0;
             for(int j=i;j<argc;j++) argv[j]=argv[j+1];
             --argc; --i;
@@ -121,6 +135,18 @@ int main(int argc, char **argv)
     }
     if(selected<0) selected=rom_path && sciv_other_castle_matches(rom_path);
     sciv_other_castle_select(selected);
+    if(msu_selected<0) msu_selected=selected ? 0 : rom_path && sciv_msu_matches(rom_path);
+    if(msu_selected && !rom_path) {fprintf(stderr,"--msu-game requires --rom with the patched ROM path.\n");return 1;}
+    sciv_msu_select(msu_selected);
+    if(msu_selected) {
+        kGameHost.window_title="Super Castlevania IV — MSU-1";
+        kGameHost.rom_file="Super_Castlevania_IV_(USA)_(MSU1).sfc";
+        kGameHost.expected_sha256_hex="49e8321030cc5d923a1b03cd8ff83843e0fd0a2445a7799b945ba736dd91be3d";
+        kGameHost.expected_crc32_hex=NULL;
+        kGameHost.game_id="supercastlevaniaiv-msu1";
+        kGameHost.sram_path="saves/msu1/save.srm";
+        sciv_msu_set_rom_path(rom_path);
+    }
     if(selected) {
         kGameHost.display_name="Other Castle (Easy)";
         kGameHost.window_title="Super Castlevania IV — Other Castle";
@@ -175,3 +201,5 @@ int main(int argc, char **argv)
     }
     return snesrecomp_desktop_main(&kGameHost, argc, argv);
 }
+
+

@@ -1,0 +1,20 @@
+diff --git a/src/common/backends/imgui/launcher_imgui.cpp b/src/common/backends/imgui/launcher_imgui.cpp
+--- a/src/common/backends/imgui/launcher_imgui.cpp
++++ b/src/common/backends/imgui/launcher_imgui.cpp
+@@ -558,3 +558,16 @@
+ static void ui_pick(LauncherModel* m, PickRequest req) {
++#ifdef SCIV_FRONTEND
++    /* Keep all browsing in the controller-friendly frontend on every device. */
++    req.from_setup = false;
++    open_builtin_picker(m, std::move(req));
++    return;
++#elif defined(_WIN32)
++    /* Native dialogs can sit behind a fullscreen SDL window. Keep browsing
++     * inside the frontend in both desktop and exclusive fullscreen modes. */
++    if (m && m->s.fullscreen != 0) {
++        open_builtin_picker(m, std::move(req));
++        return;
++    }
++#endif
+     if (!prefer_builtin_file_picker() &&
+         launcher_native_file_picker_available()) {

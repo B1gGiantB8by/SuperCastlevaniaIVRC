@@ -1,6 +1,6 @@
 # Super Castlevania IV Recomp
 
-**Version 0.1.0** — a native PC recompilation of Super Castlevania IV (USA), built with [snesrecomp](https://github.com/RetroPortingToolKit/snesrecomp) and [recomp-ui](https://github.com/mstan/recomp-ui).
+**Version 0.2.0** — a native PC recompilation of Super Castlevania IV (USA), built with [snesrecomp](https://github.com/RetroPortingToolKit/snesrecomp) and [recomp-ui](https://github.com/mstan/recomp-ui).
 
 Play the original single-player campaign with a Castlevania-themed launcher, modern display and input settings, save states, rewind, and additional modes. This is a hybrid recompilation with interpreter fallback.
 
@@ -18,6 +18,9 @@ You must supply your own legally obtained ROM. ROMs and generated game code are 
 - Level Select: all 30 substages and the original stage map transitions.
 - 37 offline achievements worth 593 G, with local progress, badges, and unlock notifications. No account is required; this does not sync with RetroAchievements.
 - Other Castle (Easy) support using a separately supplied, already patched ROM.
+- Experimental MSU-1 soundtrack support and motion interpolation.
+- Gameplay cheats for lives, invincibility, hearts, and timer; controller rumble support.
+- Windows application icon and improved file picker and overlay window handling.
 
 Widescreen development is shelved for this release. It is disabled in ordinary launches and absent from the menus; the experimental implementation remains available through `--widescreen` for development.
 
@@ -30,7 +33,7 @@ git clone --recurse-submodules https://github.com/B1gGiantB8by/SuperCastlevaniaI
 cd SuperCastlevaniaIVRC
 ```
 
-Version 0.1 includes project-specific dependency patches. Apply them before generating or building:
+Version 0.2 includes project-specific dependency patches. Apply them before generating or building:
 
 ```sh
 bash tools/apply-project-patches.sh
@@ -78,15 +81,15 @@ The repository publishes source. The manual [Release workflow](https://github.co
 
 The Release workflow is already included in this repository and runs manually. It builds setup packs for Windows, Linux, macOS Apple Silicon, and macOS Intel. Each player supplies their own ROM; no ROM upload is required to run the workflow.
 
-To build packages for the existing **v0.1.0** tag:
+To build Version **0.2.0** packages from the updated source:
 
 1. Open [Actions → Release](https://github.com/B1gGiantB8by/SuperCastlevaniaIVRC/actions/workflows/release.yml) and click **Run workflow**.
-2. Under **Use workflow from**, select the **v0.1.0 tag**.
-3. Set **Version** to `0.1.0`.
+2. Under **Use workflow from**, select **main**.
+3. Set **Version** to `0.2.0`.
 4. Keep **Publish release** and **Embed toolchain** checked; leave the remaining inputs at their defaults.
 5. Run the workflow. After every platform build succeeds, downloads and checksums appear on the [Releases page](https://github.com/B1gGiantB8by/SuperCastlevaniaIVRC/releases).
 
-If preflight reports that `tag v0.1.0 already exists`, select that tag instead of `main`. The workflow refuses to publish an existing version from a branch. To publish later changes from `main`, choose a new version such as `0.1.1`; leaving Version blank automatically bumps the latest tag according to the Bump input.
+If preflight reports that `tag v0.2.0 already exists`, select that tag instead of `main`. The workflow refuses to publish an existing version from a branch. To publish later changes from `main`, choose a new version such as `0.2.1`; leaving Version blank automatically bumps the latest tag according to the Bump input.
 
 Uncheck **Publish release** to build workflow artifacts without creating a public release. A failed build does not publish packages; inspect the failed step's log in Actions before retrying.
 
@@ -104,9 +107,9 @@ Supply your own patched `SuperCastlevaniaIVOtherCastle.sfc` and select **Other M
 
 The supported patched image is 4 MiB with SHA-256 `8e920c40c3810d624f686d231ec884507a421e35e3e2ab4f541c3b9e596d3f40`. It runs through the interpreter, uses separate saves in `saves/other-castle/`, and disables stock campaign achievements and additional modes. Choose **Return to Original Game** to switch back. Direct launch: `--other-castle --rom "/path/to/patched.sfc"`.
 
-## MSU-1 soundtrack (local development)
+## MSU-1 soundtrack (experimental)
 
-This feature is present in the current local development build. Its implementation is not included in the published v0.1.0 tag or the current GitHub source.
+Included in Version 0.2.0 source; see the experimental limitations below.
 
 Open **Audio → Choose MSU-1 ROM**, select your patched USA ROM, then choose **Play MSU-1 Soundtrack**. This option also appears in the paused frontend; the title overlay links to it under **Options → Audio → MSU-1 Soundtrack**. Switching restarts the game. Choose **Return to Original Soundtrack** to restart with your original USA ROM.
 
@@ -133,9 +136,9 @@ Save-state loading and rewind invalidate ongoing damage-free, full-quest, and si
 
 Regression scripts cover achievements, Boss Rush, Level Select, One Life, Other Castle, title menus, timing, shaders, and rewind. Some smoke checks require a built executable and the local ROM; see each `tools/test-*.ps1` script for options. Widescreen checks are retained for development.
 
-## Motion interpolation (local development)
+## Motion interpolation (experimental)
 
-This experimental feature is present in the current local development build. Its implementation is not included in the published v0.1.0 tag or the current GitHub source.
+Included in Version 0.2.0 source; see the experimental limitations below.
 
 Experimental sprite/camera interpolation is available in the title menu under
 Options > Video > Motion (Experimental), or in the launcher/pause menu under

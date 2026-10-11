@@ -8,7 +8,7 @@ try {
     $commands=@('turbo on','wait 2100','press start 1','wait 120')
     $commands+=(MoveDown 2)+@('press start 1','wait 2','press start 1','wait 2') # Options -> Video
     $commands+=(MoveDown 3)+@('press right 1','wait 2') # Smoothing
-    $commands+=(MoveDown 3)+@('press right 1','wait 2') # Sharp -> Warm Composite
+    $commands+=(MoveDown 4)+@('press right 1','wait 2') # Sharp -> Warm Composite (past Motion)
     $commands+=@('press b 1','wait 2')+(MoveDown 1)+@('press start 1','wait 2') # Audio
     $commands+=(MoveDown 1)+@('press left 1','wait 2','press b 1','wait 2') # 95% volume
     $commands+=(MoveDown 3)+@('press start 1','wait 2')+(MoveDown 1)+@('press right 1','wait 2','press b 1','wait 2') # Controls deadzone
@@ -24,3 +24,4 @@ try {
     if(Select-String -Path (Join-Path $directory 'settings-v2.log') -SimpleMatch 'in-game launcher OPEN') {throw 'Settings opened a separate launcher'}
     Write-Output 'Video, shader, audio, controls and rewind changes applied and persisted in the title menu.'
 } finally {Pop-Location}
+

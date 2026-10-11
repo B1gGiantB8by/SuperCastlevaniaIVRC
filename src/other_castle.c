@@ -43,7 +43,8 @@ void sciv_other_castle_init(void) {
         if(fgets(cached,sizeof(cached),f)) {
             cached[strcspn(cached,"\r\n")]=0;
             int hack=sciv_other_castle_matches(cached);
-            if(!paths[hack][0]) snprintf(paths[hack],sizeof(paths[hack]),"%s",cached);
+            if(!paths[hack][0] && (hack || rom_matches(cached,1048576,"0ef6f4cce5a2273fa49fe1ce724e0048a8e39c91da6b00dbb693fe1ba909177d")))
+                snprintf(paths[hack],sizeof(paths[hack]),"%s",cached);
         }
         fclose(f);
     }
